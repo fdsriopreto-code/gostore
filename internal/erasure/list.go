@@ -82,6 +82,24 @@ func (p *Pool) doList(ctx context.Context, bucket string, lp listParams) (listPa
 		lp.maxKeys = 1000
 	}
 
+	if p.bucketHasVersions(ctx, bucket) {
+		lv, err := p.listVersions(ctx, bucket, lp.prefix, lp.delimiter, lp.maxKeys, true)
+		if err != nil {
+			return listPage{}, err
+		}
+		var page listPage
+		page.isTruncated = lv.IsTruncated
+		page.prefixes = lv.Prefixes
+		for _, o := range lv.Objects {
+			if lp.startAfter != "" && o.Name <= lp.startAfter {
+				continue
+			}
+			page.objects = append(page.objects, o)
+			page.nextMarker = o.Name
+		}
+		return page, nil
+	}
+
 	// Objects are spread across sets by key hash — gather from every set.
 	owner := map[string]*Set{}
 	for _, set := range p.sets {
@@ -176,6 +194,9 @@ func (p *Pool) ListObjectsV2(ctx context.Context, bucket, prefix, token, delimit
 }
 
 func (p *Pool) ListObjectVersions(ctx context.Context, bucket, prefix, marker, versionMarker, delimiter string, maxKeys int) (object.ListObjectVersionsInfo, error) {
+	if p.bucketHasVersions(ctx, bucket) {
+		return p.listVersions(ctx, bucket, prefix, delimiter, maxKeys, false)
+	}
 	li, err := p.ListObjects(ctx, bucket, prefix, marker, delimiter, maxKeys)
 	if err != nil {
 		return object.ListObjectVersionsInfo{}, err

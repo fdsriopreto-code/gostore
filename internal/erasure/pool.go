@@ -177,6 +177,9 @@ func (p *Pool) DeleteBucket(ctx context.Context, bucket string, opts object.Dele
 // --- objects ------------------------------------------------------
 
 func (p *Pool) PutObject(ctx context.Context, bucket, key string, data *object.PutObjReader, opts object.ObjectOptions) (object.ObjectInfo, error) {
+	if opts.Versioned || opts.VersionSuspended {
+		return p.putObjectVersioned(ctx, bucket, key, data, opts)
+	}
 	if err := p.ensureBucket(ctx, bucket); err != nil {
 		return object.ObjectInfo{}, err
 	}
@@ -216,9 +219,17 @@ func (p *Pool) PutObject(ctx context.Context, bucket, key string, data *object.P
 	return metaToInfo(bucket, key, meta), nil
 }
 
-func (p *Pool) GetObjectInfo(ctx context.Context, bucket, key string, _ object.ObjectOptions) (object.ObjectInfo, error) {
+func (p *Pool) GetObjectInfo(ctx context.Context, bucket, key string, opts object.ObjectOptions) (object.ObjectInfo, error) {
 	if err := p.ensureBucket(ctx, bucket); err != nil {
 		return object.ObjectInfo{}, err
+	}
+	if opts.Versioned || opts.VersionSuspended || opts.VersionID != "" {
+		oi, err := p.statVersioned(ctx, bucket, key, opts.VersionID)
+		if err == nil || opts.VersionID != "" || !errors.Is(err, object.ErrObjectNotFound) {
+			return oi, err
+		}
+		// VersionID=="" and nothing in the version store: fall through in case
+		// this is an object that predates versioning.
 	}
 	m, err := p.setFor(key).statObject(ctx, bucket, key)
 	if err != nil {
@@ -230,6 +241,12 @@ func (p *Pool) GetObjectInfo(ctx context.Context, bucket, key string, _ object.O
 func (p *Pool) GetObjectNInfo(ctx context.Context, bucket, key string, rs *object.HTTPRangeSpec, _ http.Header, opts object.ObjectOptions) (*object.GetObjectReader, error) {
 	if err := p.ensureBucket(ctx, bucket); err != nil {
 		return nil, err
+	}
+	if opts.Versioned || opts.VersionSuspended || opts.VersionID != "" {
+		gr, err := p.getVersioned(ctx, bucket, key, rs, opts)
+		if err == nil || opts.VersionID != "" || !errors.Is(err, object.ErrObjectNotFound) {
+			return gr, err
+		}
 	}
 	set := p.setFor(key)
 	m, err := set.statObject(ctx, bucket, key)
@@ -290,9 +307,12 @@ type readCloser struct {
 func (rc readCloser) Read(p []byte) (int, error) { return rc.r.Read(p) }
 func (rc readCloser) Close() error               { return rc.c.Close() }
 
-func (p *Pool) DeleteObject(ctx context.Context, bucket, key string, _ object.ObjectOptions) (object.ObjectInfo, error) {
+func (p *Pool) DeleteObject(ctx context.Context, bucket, key string, opts object.ObjectOptions) (object.ObjectInfo, error) {
 	if err := p.ensureBucket(ctx, bucket); err != nil {
 		return object.ObjectInfo{}, err
+	}
+	if opts.Versioned || opts.VersionSuspended || opts.VersionID != "" {
+		return p.deleteVersioned(ctx, bucket, key, opts)
 	}
 	lk := p.NewNSLock(bucket, key)
 	c, _ := lk.GetLock(ctx, 0)
@@ -375,6 +395,7 @@ func metaToInfo(bucket, key string, m *XLMeta) object.ObjectInfo {
 		Size: size, ModTime: m.ModTime, ETag: m.ETag,
 		ContentType: m.ContentType, ContentEncoding: m.ContentEnc,
 		UserTags: m.UserTags, StorageClass: "STANDARD", IsLatest: true,
+		VersionID:   m.VersionID,
 		UserDefined: map[string]string{},
 	}
 	for k, v := range m.UserMeta {

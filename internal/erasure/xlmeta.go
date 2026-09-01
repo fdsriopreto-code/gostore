@@ -22,6 +22,12 @@ type XLMeta struct {
 	ModTime time.Time `json:"modTime"`
 	ETag    string    `json:"etag"`
 
+	// Versioning + Object Lock (populated on versioned buckets).
+	VersionID   string    `json:"versionId,omitempty"`
+	LockMode    string    `json:"lockMode,omitempty"` // GOVERNANCE | COMPLIANCE
+	RetainUntil time.Time `json:"retainUntil,omitempty"`
+	LegalHold   bool      `json:"legalHold,omitempty"`
+
 	ContentType string            `json:"contentType,omitempty"`
 	ContentEnc  string            `json:"contentEncoding,omitempty"`
 	UserMeta    map[string]string `json:"userMeta,omitempty"`
