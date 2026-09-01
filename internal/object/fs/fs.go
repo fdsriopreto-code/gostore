@@ -72,7 +72,12 @@ func New(root string) (*FS, error) {
 		filepath.Join(abs, sysDir, "tmp"),
 	} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
-			return nil, fmt.Errorf("fs: mkdir %s: %w", d, err)
+			if os.IsPermission(err) {
+				return nil, fmt.Errorf("fs: cannot write under volume %q (%v) — "+
+					"fix the directory ownership: `chown -R $(id -u):$(id -g) %s`, "+
+					"or for the Docker image `chown -R 65532:65532`", abs, err, abs)
+			}
+			return nil, fmt.Errorf("fs: preparing volume layout: %w", err)
 		}
 	}
 	if err := f.loadOrInitFormat(); err != nil {

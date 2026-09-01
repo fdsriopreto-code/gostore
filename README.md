@@ -90,6 +90,15 @@ docker compose up -d --build      # edite as credenciais no docker-compose.yml a
 # Console -> http://<host>:9001
 ```
 
+O container roda como usuário não-root (uid `65532`). Um **named volume** novo
+(o padrão do compose) herda a permissão certa da imagem — não precisa fazer
+nada. Se você já subiu com uma imagem antiga e tomou `permission denied`,
+recrie o volume: `docker compose down -v && docker compose up -d --build`.
+
+Se usar **bind mount de host** (`-v /srv/gostore/data:/data`), o dono do
+diretório do host prevalece, então antes:
+`sudo mkdir -p /srv/gostore/data && sudo chown -R 65532:65532 /srv/gostore/data`.
+
 ### VPS (systemd, bare-metal)
 
 ```bash

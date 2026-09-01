@@ -24,6 +24,10 @@ services:
       GOSTORE_LOG_LEVEL: "info"
       # GOSTORE_DOMAIN: "s3.example.com"   # enable virtual-host-style addressing
     volumes:
+      # Named volume: a fresh one inherits /data's ownership (uid 65532) from
+      # the image, so no chown needed. If you switch to a host bind mount
+      # (e.g. /srv/gostore/data:/data) you MUST first:
+      #   sudo mkdir -p /srv/gostore/data && sudo chown -R 65532:65532 /srv/gostore/data
       - gostore-data:/data
     healthcheck:
       test: ["CMD", "/usr/local/bin/gostore", "version"]
