@@ -16,8 +16,9 @@ import (
 // Pool is an object.Layer backed by one or more erasure sets. M4 runs a
 // single set; M5 adds multiple sets with key-hashed placement.
 type Pool struct {
-	sets []*Set
-	kms  kmsWrapper
+	sets   []*Set
+	kms    kmsWrapper
+	locker func(bucket string, objects ...string) object.RWLocker
 
 	nsMu   sync.Mutex
 	nsLock map[string]*sync.RWMutex
@@ -94,7 +95,16 @@ func (p *Pool) Health(ctx context.Context, _ object.HealthOptions) object.Health
 	return object.HealthResult{Healthy: true, WriteQuorum: p.sets[0].writeQuorum()}
 }
 
+// SetLocker installs a distributed namespace-lock factory (cluster mode).
+// When set it replaces the process-local RWMutex locks.
+func (p *Pool) SetLocker(fn func(bucket string, objects ...string) object.RWLocker) {
+	p.locker = fn
+}
+
 func (p *Pool) NewNSLock(bucket string, objects ...string) object.RWLocker {
+	if p.locker != nil {
+		return p.locker(bucket, objects...)
+	}
 	key := bucket
 	if len(objects) > 0 {
 		key = bucket + "/" + objects[0]

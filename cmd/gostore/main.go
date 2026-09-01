@@ -26,6 +26,7 @@ import (
 
 	"github.com/lojadopocket/gostore/internal/api"
 	"github.com/lojadopocket/gostore/internal/bucketcfg"
+	"github.com/lojadopocket/gostore/internal/cluster"
 	"github.com/lojadopocket/gostore/internal/config"
 	"github.com/lojadopocket/gostore/internal/erasure"
 	"github.com/lojadopocket/gostore/internal/event"
@@ -113,7 +114,53 @@ func runServer(args []string) error {
 		cfg.LogJSON = true
 	}
 
-	groups, err := expandVolumeGroups(fs.Args())
+	dargs := fs.Args()
+	clusterMode := len(dargs) > 0 && cluster.IsClusterArg(dargs[0])
+
+	var clusterRPC http.Handler
+	var obj object.Layer
+
+	if clusterMode {
+		self := os.Getenv("GOSTORE_CLUSTER_SELF")
+		secret := os.Getenv("GOSTORE_CLUSTER_SECRET")
+		spec, err := cluster.Parse(dargs, self, secret)
+		if err != nil {
+			return err
+		}
+		for _, d := range spec.LocalDisks {
+			if ld, ok := d.(interface{ String() string }); ok {
+				cfg.Volumes = append(cfg.Volumes, ld.String())
+			}
+		}
+		logger.Setup(cfg.LogLevel, cfg.LogJSON)
+		logger.Info("starting gostore (cluster)",
+			"version", version, "api", cfg.Address, "self", self,
+			"totalDisks", len(spec.Disks), "localDisks", len(spec.LocalDisks), "peers", spec.PeerBases)
+
+		km, err := kms.New(cfg.Volumes)
+		if err != nil {
+			return fmt.Errorf("init KMS: %w", err)
+		}
+		set, err := erasure.NewSet(spec.Disks)
+		if err != nil {
+			return fmt.Errorf("cluster erasure set: %w", err)
+		}
+		pool, err := erasure.NewPool(set)
+		if err != nil {
+			return err
+		}
+		pool.SetKMS(km)
+		rpc := cluster.NewRPCServer(spec.LocalDisks, secret)
+		coord := cluster.NewLockCoordinator(rpc, spec.PeerBases, secret)
+		pool.SetLocker(coord.NewNSLock)
+		clusterRPC = rpc.Handler()
+		obj = pool
+		n := len(spec.Disks)
+		logger.Info("cluster erasure pool ready", "disks", n, "dataBlocks", n-n/2, "parityBlocks", n/2)
+		return serve(cfg, obj, clusterRPC)
+	}
+
+	groups, err := expandVolumeGroups(dargs)
 	if err != nil {
 		return err
 	}
@@ -140,7 +187,6 @@ func runServer(args []string) error {
 		return fmt.Errorf("init KMS: %w", err)
 	}
 
-	var obj object.Layer
 	if cfg.SingleDisk() {
 		backend, err := fsbackend.New(cfg.VolumeGroups[0][0])
 		if err != nil {
@@ -177,6 +223,12 @@ func runServer(args []string) error {
 			"dataBlocks", n-n/2, "parityBlocks", n/2)
 	}
 
+	return serve(cfg, obj, nil)
+}
+
+// serve wires IAM, bucket config, the scanner and the HTTP servers around an
+// already-built object backend, and blocks until shutdown.
+func serve(cfg config.Config, obj object.Layer, clusterRPC http.Handler) error {
 	iamMgr, err := iam.New(cfg.RootUser, cfg.RootPassword, cfg.Volumes)
 	if err != nil {
 		return fmt.Errorf("init IAM: %w", err)
@@ -205,7 +257,7 @@ func runServer(args []string) error {
 
 	apiSrv := &http.Server{
 		Addr:              cfg.Address,
-		Handler:           api.NewServer(cfg, obj, iamMgr, bcfg, bus),
+		Handler:           api.NewServer(cfg, obj, iamMgr, bcfg, bus, clusterRPC),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	consoleSrv := &http.Server{

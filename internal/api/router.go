@@ -32,8 +32,9 @@ type Server struct {
 
 type ctxKeyAccessKey struct{}
 
-// NewServer builds the S3 API handler.
-func NewServer(cfg config.Config, obj object.Layer, im *iam.Manager, bc *bucketcfg.Store, bus *event.Bus) http.Handler {
+// NewServer builds the S3 API handler. clusterRPC, when non-nil, is mounted
+// at /gostore/internal/ for inter-node disk + lock RPC.
+func NewServer(cfg config.Config, obj object.Layer, im *iam.Manager, bc *bucketcfg.Store, bus *event.Bus, clusterRPC http.Handler) http.Handler {
 	s := &Server{
 		cfg: cfg, obj: obj, iam: im, bcfg: bc, bus: bus,
 		repl: replication.New(bc, obj),
@@ -53,6 +54,9 @@ func NewServer(cfg config.Config, obj object.Layer, im *iam.Manager, bc *bucketc
 	mux.HandleFunc("GET /gostore/health/cluster", s.handleHealthReady)
 	mux.HandleFunc("GET /gostore/health/selftest", s.handleSelfTest)
 	mux.Handle("/gostore/admin/v1/", http.HandlerFunc(s.handleAdmin))
+	if clusterRPC != nil {
+		mux.Handle("/gostore/internal/", clusterRPC)
+	}
 	mux.Handle("/gostore/console/", http.StripPrefix("/gostore/console", console.Handler()))
 	mux.HandleFunc("/gostore/console", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/gostore/console/", http.StatusFound)
