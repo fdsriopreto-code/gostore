@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lojadopocket/gostore/internal/sse"
+
 	"github.com/lojadopocket/gostore/internal/storage"
 )
 
@@ -184,6 +186,13 @@ type partSource struct {
 // identical xl.meta to every disk, all under a per-op staging dir that is
 // atomically renamed into place. Returns the committed metadata.
 func (s *Set) putObject(ctx context.Context, bucket, key string, parts []partSource, um userMeta) (*XLMeta, error) {
+	return s.putObjectSSE(ctx, bucket, key, parts, um, nil)
+}
+
+// putObjectSSE is putObject with optional SSE-S3 encryption (single part
+// only). When sp != nil the part reader is encrypted before erasure coding
+// and the metadata records the plaintext md5 + size.
+func (s *Set) putObjectSSE(ctx context.Context, bucket, key string, parts []partSource, um userMeta, sp *sseParams) (*XLMeta, error) {
 	staging := path.Join(tmpPrefix, storage.NewID())
 	defer s.cleanupStaging(ctx, staging)
 
@@ -209,16 +218,25 @@ func (s *Set) putObject(ctx context.Context, bucket, key string, parts []partSou
 	partMD5Raw := make([]byte, 0, len(parts)*16)
 
 	for _, ps := range parts {
-		checks, plainMD5, written, err := s.encodePart(ctx, staging, ps.Number, dist, ps.Reader)
+		reader := ps.Reader
+		if sp != nil {
+			reader = sp.wrapForEncrypt(reader)
+		}
+		checks, ctMD5, written, err := s.encodePart(ctx, staging, ps.Number, dist, reader)
 		if err != nil {
 			return nil, err
 		}
+		partETag := ctMD5
+		if sp != nil {
+			sp.callFinish()
+			partETag = sp.plainMD5 // S3 ETag is the plaintext md5
+		}
 		total += written
 		meta.Parts = append(meta.Parts, PartMeta{
-			Number: ps.Number, Size: written, ActualSize: written, ETag: plainMD5,
+			Number: ps.Number, Size: written, ActualSize: written, ETag: partETag,
 			Checksums: checks,
 		})
-		if raw, derr := hex.DecodeString(plainMD5); derr == nil {
+		if raw, derr := hex.DecodeString(partETag); derr == nil {
 			partMD5Raw = append(partMD5Raw, raw...)
 		}
 	}
@@ -229,6 +247,12 @@ func (s *Set) putObject(ctx context.Context, bucket, key string, parts []partSou
 	} else {
 		sum := md5.Sum(partMD5Raw)
 		meta.ETag = hex.EncodeToString(sum[:]) + "-" + fmt.Sprint(len(parts))
+	}
+	if sp != nil {
+		meta.SSE = sse.Algorithm
+		meta.PlainSize = sp.plainLen
+		meta.EncDEK = sp.encDEK
+		meta.NoncePrefix = hex.EncodeToString(sp.prefix)
 	}
 
 	// Write identical xl.meta to every disk's staging dir.

@@ -169,6 +169,7 @@ func runServer(args []string) error {
 		if err != nil {
 			return fmt.Errorf("init erasure pool: %w", err)
 		}
+		pool.SetKMS(km)
 		obj = pool
 		n := len(cfg.VolumeGroups[0])
 		logger.Info("erasure backend ready",

@@ -17,6 +17,7 @@ import (
 // single set; M5 adds multiple sets with key-hashed placement.
 type Pool struct {
 	sets []*Set
+	kms  kmsWrapper
 
 	nsMu   sync.Mutex
 	nsLock map[string]*sync.RWMutex
@@ -194,9 +195,18 @@ func (p *Pool) PutObject(ctx context.Context, bucket, key string, data *object.P
 		}
 	}
 
-	meta, err := p.setFor(key).putObject(ctx, bucket, key, []partSource{
+	var sp *sseParams
+	if p.kms != nil {
+		if v := opts.UserDefined["x-amz-server-side-encryption"]; v == "AES256" || v == "aws:kms" {
+			var serr error
+			if sp, serr = p.newSSEParams(); serr != nil {
+				return object.ObjectInfo{}, serr
+			}
+		}
+	}
+	meta, err := p.setFor(key).putObjectSSE(ctx, bucket, key, []partSource{
 		{Number: 1, Size: data.Size(), Reader: data},
-	}, toUserMeta(opts))
+	}, toUserMeta(opts), sp)
 	if err != nil {
 		return object.ObjectInfo{}, mapErr(err)
 	}
@@ -231,14 +241,37 @@ func (p *Pool) GetObjectNInfo(ctx context.Context, bucket, key string, rs *objec
 		return nil, object.ErrPreconditionFailed
 	}
 
-	var off, length int64 = 0, m.Size
+	// logical (plaintext) size — differs from stored size when encrypted
+	logical := m.Size
+	if m.SSE != "" {
+		logical = m.PlainSize
+	}
+	var off, length int64 = 0, logical
 	if rs != nil {
-		o, l, rerr := resolveRange(rs, m.Size)
+		o, l, rerr := resolveRange(rs, logical)
 		if rerr != nil {
 			return nil, rerr
 		}
 		off, length = o, l
 		oi.Size = length
+	}
+
+	if m.SSE != "" {
+		if p.kms == nil {
+			return nil, object.ErrCorruptedData
+		}
+		cipherOff, cipherLen := cipherRange(off, length, m.Size)
+		pr, pw := io.Pipe()
+		go func() {
+			err := set.getObject(ctx, bucket, key, cipherOff, cipherLen, pw)
+			_ = pw.CloseWithError(err)
+		}()
+		dr, derr := p.decryptReader(m, pr, off, length)
+		if derr != nil {
+			_ = pr.CloseWithError(derr)
+			return nil, derr
+		}
+		return &object.GetObjectReader{ObjInfo: oi, ReadCloser: readCloser{dr, pr}}, nil
 	}
 
 	pr, pw := io.Pipe()
@@ -248,6 +281,14 @@ func (p *Pool) GetObjectNInfo(ctx context.Context, bucket, key string, rs *objec
 	}()
 	return &object.GetObjectReader{ObjInfo: oi, ReadCloser: pr}, nil
 }
+
+type readCloser struct {
+	r io.Reader
+	c io.Closer
+}
+
+func (rc readCloser) Read(p []byte) (int, error) { return rc.r.Read(p) }
+func (rc readCloser) Close() error               { return rc.c.Close() }
 
 func (p *Pool) DeleteObject(ctx context.Context, bucket, key string, _ object.ObjectOptions) (object.ObjectInfo, error) {
 	if err := p.ensureBucket(ctx, bucket); err != nil {
@@ -325,9 +366,13 @@ func toUserMeta(opts object.ObjectOptions) userMeta {
 }
 
 func metaToInfo(bucket, key string, m *XLMeta) object.ObjectInfo {
+	size := m.Size
+	if m.SSE != "" {
+		size = m.PlainSize
+	}
 	oi := object.ObjectInfo{
 		Bucket: bucket, Name: key,
-		Size: m.Size, ModTime: m.ModTime, ETag: m.ETag,
+		Size: size, ModTime: m.ModTime, ETag: m.ETag,
 		ContentType: m.ContentType, ContentEncoding: m.ContentEnc,
 		UserTags: m.UserTags, StorageClass: "STANDARD", IsLatest: true,
 		UserDefined: map[string]string{},
@@ -337,6 +382,9 @@ func metaToInfo(bucket, key string, m *XLMeta) object.ObjectInfo {
 	}
 	if m.ContentType != "" {
 		oi.UserDefined["content-type"] = m.ContentType
+	}
+	if m.SSE != "" {
+		oi.UserDefined["x-amz-server-side-encryption"] = m.SSE
 	}
 	for _, pt := range m.Parts {
 		oi.Parts = append(oi.Parts, object.ObjectPartInfo{

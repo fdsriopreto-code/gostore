@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/lojadopocket/gostore/internal/kms"
 	"github.com/lojadopocket/gostore/internal/object"
 	"github.com/lojadopocket/gostore/internal/storage"
 )
@@ -424,6 +425,56 @@ func TestServerPoolsMultipart(t *testing.T) {
 	got := get(t, p, "buck", "spread/big")
 	if !bytes.Equal(got, append(append([]byte{}, p1...), p2...)) {
 		t.Fatal("assembled mismatch")
+	}
+}
+
+func TestErasureSSERoundTrip(t *testing.T) {
+	p, _ := newTestPool(t, 4)
+	km, err := kms.New([]string{t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.SetKMS(km)
+	_ = p.MakeBucket(ctx(), "sbuck", object.MakeBucketOptions{})
+
+	for _, size := range []int{0, 200, 70000, blockSizeV2*2 + 4096} {
+		data := make([]byte, size)
+		_, _ = rand.Read(data)
+		oi, err := p.PutObject(ctx(), "sbuck", "e/obj",
+			object.NewPutObjReader(bytes.NewReader(data), int64(size), int64(size)),
+			object.ObjectOptions{UserDefined: map[string]string{"x-amz-server-side-encryption": "AES256"}})
+		if err != nil {
+			t.Fatalf("size %d: put: %v", size, err)
+		}
+		if oi.Size != int64(size) {
+			t.Fatalf("size %d: reported %d", size, oi.Size)
+		}
+		if oi.ETag != md5hex(data) {
+			t.Fatalf("size %d: etag is not plaintext md5", size)
+		}
+		if oi.UserDefined["x-amz-server-side-encryption"] != "AES256" {
+			t.Fatalf("size %d: missing sse marker", size)
+		}
+
+		got := get(t, p, "sbuck", "e/obj")
+		if !bytes.Equal(got, data) {
+			t.Fatalf("size %d: sse decrypt mismatch (got %d)", size, len(got))
+		}
+
+		if size <= 65536 {
+			continue
+		}
+		start, ln := int64(65536-30), int64(64)
+		gr, gerr := p.GetObjectNInfo(ctx(), "sbuck", "e/obj",
+			&object.HTTPRangeSpec{Start: start, End: start + ln - 1}, nil, object.ObjectOptions{})
+		if gerr != nil {
+			t.Fatalf("size %d: range: %v", size, gerr)
+		}
+		rb, _ := io.ReadAll(gr)
+		gr.Close()
+		if !bytes.Equal(rb, data[start:start+ln]) {
+			t.Fatalf("size %d: encrypted erasure range mismatch", size)
+		}
 	}
 }
 

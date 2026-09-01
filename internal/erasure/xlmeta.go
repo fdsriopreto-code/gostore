@@ -28,6 +28,13 @@ type XLMeta struct {
 	UserTags    string            `json:"userTags,omitempty"`
 
 	Parts []PartMeta `json:"parts"`
+
+	// SSE-S3 at rest. When SSE == "AES256": Size/part sizes are ciphertext,
+	// PlainSize is the logical object size, ETag the plaintext md5.
+	SSE         string `json:"sse,omitempty"`
+	PlainSize   int64  `json:"plainSize,omitempty"`
+	EncDEK      string `json:"encDEK,omitempty"`      // hex, master-key-wrapped data key
+	NoncePrefix string `json:"noncePrefix,omitempty"` // hex, 4 bytes
 }
 
 // ErasureMeta captures the coding parameters for the object.
