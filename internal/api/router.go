@@ -14,6 +14,7 @@ import (
 	"github.com/lojadopocket/gostore/internal/iam"
 	"github.com/lojadopocket/gostore/internal/object"
 	"github.com/lojadopocket/gostore/internal/replication"
+	"github.com/lojadopocket/gostore/internal/scanner"
 )
 
 // Server is the S3 + admin API HTTP handler.
@@ -24,6 +25,7 @@ type Server struct {
 	bcfg *bucketcfg.Store
 	bus  *event.Bus
 	repl *replication.Manager
+	scan *scanner.Scanner
 
 	domainNames []string
 }
@@ -32,7 +34,11 @@ type ctxKeyAccessKey struct{}
 
 // NewServer builds the S3 API handler.
 func NewServer(cfg config.Config, obj object.Layer, im *iam.Manager, bc *bucketcfg.Store, bus *event.Bus) http.Handler {
-	s := &Server{cfg: cfg, obj: obj, iam: im, bcfg: bc, bus: bus, repl: replication.New(bc, obj)}
+	s := &Server{
+		cfg: cfg, obj: obj, iam: im, bcfg: bc, bus: bus,
+		repl: replication.New(bc, obj),
+		scan: scanner.New(obj, bc, 0),
+	}
 	if v := strings.TrimSpace(os.Getenv("GOSTORE_DOMAIN")); v != "" {
 		for _, d := range strings.Split(v, ",") {
 			if d = strings.TrimSpace(d); d != "" {
@@ -165,6 +171,8 @@ func (s *Server) dispatchBucket(w http.ResponseWriter, r *http.Request, bucket s
 			s.handleGetBucketObjectLock(w, r, bucket)
 		case has("replication"):
 			s.handleGetBucketReplication(w, r, bucket)
+		case has("lifecycle"):
+			s.handleGetBucketLifecycle(w, r, bucket)
 		case has("notification"):
 			s.handleGetBucketNotification(w, r, bucket)
 		case q["list-type"] != nil && q["list-type"][0] == "2":
@@ -188,7 +196,9 @@ func (s *Server) dispatchBucket(w http.ResponseWriter, r *http.Request, bucket s
 			s.handlePutBucketObjectLock(w, r, bucket)
 		case has("replication"):
 			s.handlePutBucketReplication(w, r, bucket)
-		case has("acl") || has("lifecycle"):
+		case has("lifecycle"):
+			s.handlePutBucketLifecycle(w, r, bucket)
+		case has("acl"):
 			writeSuccessOK(w) // accept-and-ignore
 		default:
 			s.handleCreateBucket(w, r, bucket)
@@ -204,7 +214,7 @@ func (s *Server) dispatchBucket(w http.ResponseWriter, r *http.Request, bucket s
 		case has("replication"):
 			s.handleDeleteBucketReplication(w, r, bucket)
 		case has("lifecycle"):
-			writeSuccessNoContent(w)
+			s.handleDeleteBucketLifecycle(w, r, bucket)
 		default:
 			s.handleDeleteBucket(w, r, bucket)
 		}

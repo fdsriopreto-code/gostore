@@ -575,6 +575,17 @@ async function bucketSettings(b) {
       el("button", { class: "primary sm", onclick: async () => { try { await must(await api("PUT", "/" + b, { query: { replication: "" }, contentType: "application/json", body: rTa.value })); toast("Replication saved", "ok"); } catch (e) { toast(e.message, "err"); } } }, "Save"),
       el("button", { class: "danger sm", onclick: async () => { await api("DELETE", "/" + b, { query: { replication: "" } }); rTa.value = "[]"; toast("Replication removed", "ok"); } }, "Remove"))));
 
+  // lifecycle
+  let lc = "";
+  try { const r = await api("GET", "/" + b, { query: { lifecycle: "" } }); if (r.ok) { const t = await r.text(); if (t.startsWith("<Lifecycle")) lc = t; } } catch {}
+  const lcTa = el("textarea", { placeholder: '<LifecycleConfiguration><Rule><ID>expire-logs</ID><Status>Enabled</Status><Filter><Prefix>logs/</Prefix></Filter><Expiration><Days>30</Days></Expiration></Rule></LifecycleConfiguration>' }, lc);
+  sec("Lifecycle (ILM)", el("div", {},
+    el("p", { class: "muted", style: "font-size:12.5px;margin:.2em 0" }, "Expiration / NoncurrentVersionExpiration / AbortIncompleteMultipartUpload. Applied by the background scanner (default hourly)."),
+    lcTa,
+    el("div", { class: "toolbar" },
+      el("button", { class: "primary sm", onclick: async () => { try { await must(await api("PUT", "/" + b, { query: { lifecycle: "" }, contentType: "application/xml", body: lcTa.value })); toast("Lifecycle saved", "ok"); } catch (e) { toast(e.message, "err"); } } }, "Save"),
+      el("button", { class: "danger sm", onclick: async () => { await api("DELETE", "/" + b, { query: { lifecycle: "" } }); lcTa.value = ""; toast("Lifecycle removed", "ok"); } }, "Remove"))));
+
   // notifications
   let notif = { webhooks: [] };
   try { const r = await api("GET", "/" + b, { query: { notification: "" } }); if (r.ok) notif = await r.json(); } catch {}

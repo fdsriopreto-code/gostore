@@ -34,6 +34,7 @@ import (
 	"github.com/lojadopocket/gostore/internal/logger"
 	"github.com/lojadopocket/gostore/internal/object"
 	fsbackend "github.com/lojadopocket/gostore/internal/object/fs"
+	"github.com/lojadopocket/gostore/internal/scanner"
 	"github.com/lojadopocket/gostore/internal/storage"
 )
 
@@ -189,6 +190,17 @@ func runServer(args []string) error {
 		return fmt.Errorf("init bucket config: %w", err)
 	}
 	bus := event.New(bcfg)
+
+	scanInterval := time.Hour
+	if v := os.Getenv("GOSTORE_SCAN_INTERVAL"); v != "" {
+		if d, perr := time.ParseDuration(v); perr == nil && d > 0 {
+			scanInterval = d
+		}
+	}
+	scanCtx, stopScan := context.WithCancel(context.Background())
+	defer stopScan()
+	go scanner.New(obj, bcfg, scanInterval).Run(scanCtx)
+	logger.Info("lifecycle scanner started", "interval", scanInterval)
 
 	apiSrv := &http.Server{
 		Addr:              cfg.Address,

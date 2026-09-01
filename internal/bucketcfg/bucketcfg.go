@@ -24,6 +24,21 @@ type Config struct {
 	ObjectLock *ObjectLockConfig `json:"objectLock,omitempty"`
 	// Replication rules copy object writes/deletes to a destination.
 	Replication []ReplicationRule `json:"replication,omitempty"`
+	// Lifecycle rules expire objects / noncurrent versions / stale uploads.
+	Lifecycle []LifecycleRule `json:"lifecycle,omitempty"`
+}
+
+// LifecycleRule is a subset of an S3 lifecycle rule.
+type LifecycleRule struct {
+	ID     string `json:"id"`
+	Prefix string `json:"prefix,omitempty"`
+	Status string `json:"status"` // "Enabled" | "Disabled"
+
+	ExpirationDays                  int    `json:"expirationDays,omitempty"`
+	ExpirationDate                  string `json:"expirationDate,omitempty"` // RFC3339
+	ExpiredObjectDeleteMarker       bool   `json:"expiredObjectDeleteMarker,omitempty"`
+	NoncurrentVersionExpirationDays int    `json:"noncurrentVersionExpirationDays,omitempty"`
+	AbortIncompleteMultipartDays    int    `json:"abortIncompleteMultipartUploadDays,omitempty"`
 }
 
 // ReplicationRule copies matching objects to a destination bucket — local

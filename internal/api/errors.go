@@ -51,6 +51,7 @@ const (
 	ErrNoSuchObjectLockConfiguration
 	ErrObjectLockConflict
 	ErrInvalidBucketState
+	ErrNoSuchLifecycleConfiguration
 )
 
 // APIError is the resolved (code, message, http status) triple.
@@ -101,6 +102,7 @@ var errorCodeMap = map[APIErrorCode]APIError{
 	ErrNoSuchObjectLockConfiguration: {"ObjectLockConfigurationNotFoundError", "Object Lock configuration does not exist for this bucket.", http.StatusNotFound},
 	ErrObjectLockConflict:            {"AccessDenied", "Access Denied because the object is protected by object lock (retention or legal hold).", http.StatusForbidden},
 	ErrInvalidBucketState:            {"InvalidBucketState", "The request is not valid for the current state of the bucket.", http.StatusConflict},
+	ErrNoSuchLifecycleConfiguration:  {"NoSuchLifecycleConfiguration", "The lifecycle configuration does not exist.", http.StatusNotFound},
 }
 
 // GetAPIError resolves a code; unknown codes fall back to InternalError.
