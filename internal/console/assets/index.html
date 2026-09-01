@@ -4,89 +4,183 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>gostore console</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f6feb'/%3E%3Cpath d='M8 11h16l-2 13H10z' fill='none' stroke='white' stroke-width='2.2' stroke-linejoin='round'/%3E%3Cpath d='M12 11V9a4 4 0 0 1 8 0v2' fill='none' stroke='white' stroke-width='2.2'/%3E%3C/svg%3E">
 <style>
-  :root {
-    --bg: #f7f7f8; --panel: #fff; --border: #e3e3e6; --text: #1a1a1c;
-    --muted: #6b6b70; --accent: #2f6feb; --accent-fg: #fff; --danger: #d23b3b;
-    --row-hover: #f0f3fa; --code-bg: #f0f0f2;
+  :root{
+    --bg:#f4f5f7; --panel:#fff; --panel-2:#fafbfc; --border:#e4e6eb; --border-strong:#d0d3da;
+    --text:#1c1d21; --muted:#6a6d78; --faint:#9498a3;
+    --accent:#2f6feb; --accent-hover:#245bd0; --accent-soft:#eaf1fe; --accent-fg:#fff;
+    --danger:#d6383b; --danger-soft:#fdecec; --ok:#1f9d57;
+    --row-hover:#f2f6fe; --code-bg:#f1f2f5; --shadow:0 1px 2px rgba(20,22,30,.06),0 8px 24px rgba(20,22,30,.08);
+    --radius:9px;
   }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #16171a; --panel: #1e1f23; --border: #313239; --text: #e8e8ea;
-      --muted: #9a9aa2; --accent: #4f8bff; --accent-fg: #fff; --danger: #ff5c5c;
-      --row-hover: #26272c; --code-bg: #26272c;
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#131417; --panel:#1c1d21; --panel-2:#202126; --border:#2c2e35; --border-strong:#3a3d46;
+      --text:#e9eaee; --muted:#9a9dab; --faint:#71747f;
+      --accent:#4f8bff; --accent-hover:#6a9dff; --accent-soft:#1b2740; --accent-fg:#fff;
+      --danger:#ff5b5e; --danger-soft:#3a1f21; --ok:#3fce80;
+      --row-hover:#23252c; --code-bg:#25262c; --shadow:0 1px 2px rgba(0,0,0,.3),0 12px 32px rgba(0,0,0,.4);
     }
   }
-  * { box-sizing: border-box; }
-  body { margin: 0; font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-         background: var(--bg); color: var(--text); }
-  a { color: var(--accent); text-decoration: none; }
-  button { font: inherit; cursor: pointer; border: 1px solid var(--border);
-           background: var(--panel); color: var(--text); border-radius: 7px; padding: 6px 12px; }
-  button.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
-  button.danger { color: var(--danger); border-color: var(--danger); background: transparent; }
-  button:disabled { opacity: .5; cursor: default; }
-  input, select { font: inherit; padding: 7px 9px; border: 1px solid var(--border);
-                  border-radius: 7px; background: var(--panel); color: var(--text); width: 100%; }
-  code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
-  .hidden { display: none !important; }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased}
+  a{color:var(--accent);text-decoration:none}
+  svg.i{width:16px;height:16px;flex:none;vertical-align:-3px}
+  button{font:inherit;cursor:pointer;border:1px solid var(--border-strong);background:var(--panel);
+    color:var(--text);border-radius:8px;padding:7px 12px;display:inline-flex;align-items:center;gap:6px;
+    transition:background .12s,border-color .12s,opacity .12s}
+  button:hover{background:var(--panel-2)}
+  button.primary{background:var(--accent);color:var(--accent-fg);border-color:transparent}
+  button.primary:hover{background:var(--accent-hover)}
+  button.ghost{border-color:transparent;background:transparent}
+  button.ghost:hover{background:var(--row-hover)}
+  button.danger{color:var(--danger);border-color:var(--danger)}
+  button.danger:hover{background:var(--danger-soft)}
+  button.sm{padding:4px 9px;font-size:12.5px}
+  button:disabled{opacity:.45;cursor:default}
+  input,select,textarea{font:inherit;padding:8px 10px;border:1px solid var(--border-strong);border-radius:8px;
+    background:var(--panel);color:var(--text);width:100%}
+  textarea{resize:vertical;min-height:120px;font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  input:focus,select:focus,textarea:focus{outline:2px solid var(--accent-soft);outline-offset:0;border-color:var(--accent)}
+  code{background:var(--code-bg);padding:1px 5px;border-radius:5px;font:12px ui-monospace,Menlo,Consolas,monospace}
+  .hidden{display:none!important}
+  .muted{color:var(--muted)}
+  .spin{width:15px;height:15px;border:2px solid var(--border-strong);border-top-color:var(--accent);
+    border-radius:50%;animation:sp .7s linear infinite;display:inline-block}
+  @keyframes sp{to{transform:rotate(360deg)}}
 
   /* login */
-  #login { max-width: 380px; margin: 12vh auto; background: var(--panel);
-           border: 1px solid var(--border); border-radius: 12px; padding: 28px; }
-  #login h1 { margin: 0 0 4px; font-size: 20px; }
-  #login p.sub { margin: 0 0 20px; color: var(--muted); }
-  #login label { display: block; margin: 12px 0 4px; font-size: 12px; color: var(--muted); }
-  #login button { width: 100%; margin-top: 18px; }
-  #loginErr { color: var(--danger); margin-top: 12px; font-size: 13px; min-height: 18px; }
+  #login{max-width:400px;margin:11vh auto;background:var(--panel);border:1px solid var(--border);
+    border-radius:16px;padding:34px;box-shadow:var(--shadow)}
+  #login .logo{width:44px;height:44px;border-radius:11px;background:var(--accent);display:grid;place-items:center;margin-bottom:14px}
+  #login h1{margin:0;font-size:21px;letter-spacing:-.01em}
+  #login p.sub{margin:2px 0 22px;color:var(--muted)}
+  #login label{display:block;margin:14px 0 5px;font-size:12px;color:var(--muted);font-weight:600;letter-spacing:.02em}
+  #login button{width:100%;margin-top:22px;justify-content:center;padding:10px}
+  #loginErr{color:var(--danger);margin-top:12px;font-size:13px;min-height:18px}
 
-  /* app shell */
-  #app { display: grid; grid-template-columns: 210px 1fr; min-height: 100vh; }
-  nav { background: var(--panel); border-right: 1px solid var(--border); padding: 18px 12px; }
-  nav .brand { font-weight: 700; font-size: 16px; padding: 0 8px 16px; }
-  nav a { display: block; padding: 8px 10px; border-radius: 7px; color: var(--text); }
-  nav a.active { background: var(--accent); color: var(--accent-fg); }
-  nav a:hover:not(.active) { background: var(--row-hover); }
-  nav .foot { position: sticky; top: 100vh; color: var(--muted); font-size: 12px; padding: 8px; }
-  main { padding: 22px 26px; overflow-x: auto; }
-  h2 { margin: 0 0 4px; font-size: 18px; }
-  .bar { display: flex; gap: 8px; align-items: center; margin: 14px 0; flex-wrap: wrap; }
-  .bar .grow { flex: 1; }
-  .crumbs { color: var(--muted); margin: 8px 0; font-size: 13px; }
-  .crumbs a { color: var(--accent); }
+  /* shell */
+  #app{display:grid;grid-template-columns:230px 1fr;grid-template-rows:52px 1fr;height:100%;
+    grid-template-areas:"brand top" "nav main"}
+  .brand{grid-area:brand;display:flex;align-items:center;gap:9px;padding:0 18px;font-weight:700;font-size:15px;
+    border-bottom:1px solid var(--border);border-right:1px solid var(--border);background:var(--panel)}
+  .brand .logo{width:24px;height:24px;border-radius:7px;background:var(--accent);display:grid;place-items:center}
+  .topbar{grid-area:top;display:flex;align-items:center;gap:12px;padding:0 20px;border-bottom:1px solid var(--border);
+    background:var(--panel)}
+  .topbar .crumbs{flex:1;display:flex;align-items:center;gap:6px;color:var(--muted);font-size:13px;min-width:0;overflow:hidden}
+  .topbar .crumbs a{color:var(--muted);white-space:nowrap}
+  .topbar .crumbs a:hover{color:var(--text)}
+  .topbar .crumbs .cur{color:var(--text);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .who{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted)}
+  nav{grid-area:nav;background:var(--panel);border-right:1px solid var(--border);padding:14px 10px;display:flex;flex-direction:column}
+  nav a{display:flex;align-items:center;gap:10px;padding:9px 11px;border-radius:8px;color:var(--text);font-weight:500}
+  nav a .i{color:var(--muted)}
+  nav a.active{background:var(--accent);color:var(--accent-fg)}
+  nav a.active .i{color:var(--accent-fg)}
+  nav a:hover:not(.active){background:var(--row-hover)}
+  nav .grow{flex:1}
+  nav .ver{padding:8px 11px;color:var(--faint);font-size:11.5px}
+  main{grid-area:main;overflow:auto;padding:24px 28px}
+  .page-h{display:flex;align-items:flex-end;gap:12px;margin-bottom:6px}
+  .page-h h2{margin:0;font-size:20px;letter-spacing:-.01em}
+  .page-h .sub{color:var(--muted);font-size:13px}
+  .toolbar{display:flex;gap:9px;align-items:center;margin:16px 0;flex-wrap:wrap}
+  .toolbar .grow{flex:1}
+  .search{position:relative;min-width:220px}
+  .search .i{position:absolute;left:9px;top:9px;color:var(--faint)}
+  .search input{padding-left:31px}
 
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); font-size: 13px; }
-  th { color: var(--muted); font-weight: 600; }
-  tbody tr:hover { background: var(--row-hover); }
-  td.num { text-align: right; font-variant-numeric: tabular-nums; }
-  td.actions { text-align: right; white-space: nowrap; }
-  .tag { display: inline-block; background: var(--code-bg); border-radius: 999px;
-         padding: 1px 8px; font-size: 11px; color: var(--muted); margin-right: 4px; }
-  .empty { color: var(--muted); padding: 30px 4px; }
-  .stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; margin: 16px 0; }
-  .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
-  .stat .k { color: var(--muted); font-size: 12px; }
-  .stat .v { font-size: 20px; font-weight: 700; margin-top: 2px; }
-  #toast { position: fixed; right: 18px; bottom: 18px; display: flex; flex-direction: column; gap: 8px; z-index: 50; }
-  #toast div { background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--accent);
-               border-radius: 8px; padding: 10px 14px; box-shadow: 0 6px 20px rgba(0,0,0,.15); max-width: 340px; font-size: 13px; }
-  #toast div.err { border-left-color: var(--danger); }
-  dialog { border: 1px solid var(--border); border-radius: 12px; background: var(--panel); color: var(--text);
-           padding: 22px; max-width: 440px; width: 90%; }
-  dialog::backdrop { background: rgba(0,0,0,.4); }
-  dialog h3 { margin: 0 0 14px; }
-  dialog label { display:block; margin: 10px 0 4px; font-size: 12px; color: var(--muted); }
-  dialog .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; }
+  /* table */
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
+  table{width:100%;border-collapse:collapse}
+  th,td{text-align:left;padding:10px 14px;font-size:13px;border-bottom:1px solid var(--border)}
+  th{color:var(--muted);font-weight:600;background:var(--panel-2);position:sticky;top:0}
+  tbody tr:last-child td{border-bottom:0}
+  tbody tr{cursor:default}
+  tbody tr.clk{cursor:pointer}
+  tbody tr.clk:hover{background:var(--row-hover)}
+  td.num{text-align:right;font-variant-numeric:tabular-nums;color:var(--muted)}
+  td.act{text-align:right;white-space:nowrap}
+  td .name{display:flex;align-items:center;gap:9px}
+  td .name .i{color:var(--faint)}
+  td .name.folder .i{color:var(--accent)}
+  .chk{width:15px;height:15px;accent-color:var(--accent);cursor:pointer}
+  .pill{display:inline-flex;align-items:center;gap:4px;background:var(--code-bg);border-radius:999px;
+    padding:2px 9px;font-size:11.5px;color:var(--muted);margin:0 3px 2px 0}
+  .pill.ok{background:color-mix(in srgb,var(--ok) 15%,transparent);color:var(--ok)}
+  .empty{padding:56px 16px;text-align:center;color:var(--muted)}
+  .empty .i{width:34px;height:34px;color:var(--border-strong);margin-bottom:8px}
+
+  .stat-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;margin:18px 0}
+  .stat{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:15px}
+  .stat .k{color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px}
+  .stat .v{font-size:21px;font-weight:700;margin-top:4px;letter-spacing:-.01em}
+
+  /* dropzone */
+  #drop{border:2px dashed transparent;border-radius:12px;transition:border-color .12s,background .12s}
+  #drop.hot{border-color:var(--accent);background:var(--accent-soft)}
+  #uplist{margin:10px 0}
+  #uplist .up{display:flex;align-items:center;gap:10px;font-size:12.5px;padding:5px 2px;color:var(--muted)}
+  #uplist .bar{flex:1;height:5px;background:var(--code-bg);border-radius:99px;overflow:hidden}
+  #uplist .bar>span{display:block;height:100%;background:var(--accent);width:0;transition:width .2s}
+
+  /* drawer */
+  #scrim{position:fixed;inset:0;background:rgba(10,12,20,.42);opacity:0;pointer-events:none;transition:opacity .18s;z-index:40}
+  #scrim.on{opacity:1;pointer-events:auto}
+  #drawer{position:fixed;top:0;right:0;height:100%;width:min(460px,94vw);background:var(--panel);
+    border-left:1px solid var(--border);box-shadow:var(--shadow);transform:translateX(100%);transition:transform .2s;
+    z-index:41;display:flex;flex-direction:column}
+  #drawer.on{transform:none}
+  #drawer .dh{display:flex;align-items:center;gap:10px;padding:16px 18px;border-bottom:1px solid var(--border)}
+  #drawer .dh h3{margin:0;font-size:15px;flex:1;word-break:break-all}
+  #drawer .db{padding:18px;overflow:auto;flex:1}
+  #drawer .tabs{display:flex;gap:4px;padding:10px 12px 0;border-bottom:1px solid var(--border)}
+  #drawer .tabs button{border:0;background:transparent;border-radius:7px 7px 0 0;color:var(--muted);padding:8px 12px}
+  #drawer .tabs button.on{color:var(--text);background:var(--panel-2);border-bottom:2px solid var(--accent)}
+  .kv{display:grid;grid-template-columns:110px 1fr;gap:6px 12px;font-size:13px;margin:4px 0 16px}
+  .kv .k{color:var(--muted)}
+  .kv .v{word-break:break-all}
+  .field{margin:12px 0}
+  .field label{display:block;font-size:12px;color:var(--muted);font-weight:600;margin-bottom:5px}
+  .drawer-foot{padding:14px 18px;border-top:1px solid var(--border);display:flex;gap:8px;justify-content:flex-end}
+
+  #toast{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;gap:8px;z-index:60}
+  #toast div{background:var(--panel);border:1px solid var(--border);border-left:3px solid var(--accent);
+    border-radius:9px;padding:11px 15px;box-shadow:var(--shadow);max-width:360px;font-size:13px;
+    animation:slidein .18s ease}
+  #toast div.err{border-left-color:var(--danger)}
+  #toast div.ok{border-left-color:var(--ok)}
+  @keyframes slidein{from{transform:translateX(20px);opacity:0}}
+
+  dialog{border:1px solid var(--border);border-radius:14px;background:var(--panel);color:var(--text);
+    padding:24px;max-width:460px;width:92%;box-shadow:var(--shadow)}
+  dialog::backdrop{background:rgba(10,12,20,.45)}
+  dialog h3{margin:0 0 4px;font-size:16px}
+  dialog p.hint{margin:0 0 14px;color:var(--muted);font-size:12.5px}
+  dialog label{display:block;margin:12px 0 5px;font-size:12px;color:var(--muted);font-weight:600}
+  dialog .row{display:flex;gap:8px;justify-content:flex-end;margin-top:20px}
+
+  @media (max-width:720px){
+    #app{grid-template-columns:1fr;grid-template-rows:52px auto 1fr;grid-template-areas:"brand" "nav" "main"}
+    .brand{border-right:0}
+    nav{flex-direction:row;overflow-x:auto;padding:8px;border-right:0;border-bottom:1px solid var(--border)}
+    nav .grow,nav .ver{display:none}
+    .topbar{display:none}
+  }
 </style>
 </head>
 <body>
 
 <section id="login">
+  <div class="logo"><svg class="i" style="width:26px;height:26px" viewBox="0 0 32 32" fill="none"><path d="M8 11h16l-2 13H10z" stroke="white" stroke-width="2.4" stroke-linejoin="round"/><path d="M12 11V9a4 4 0 0 1 8 0v2" stroke="white" stroke-width="2.4"/></svg></div>
   <h1>gostore</h1>
   <p class="sub">S3-compatible object storage</p>
   <label>Access Key</label>
-  <input id="ak" autocomplete="username" autofocus>
+  <input id="ak" autocomplete="username" autofocus spellcheck="false">
   <label>Secret Key</label>
   <input id="sk" type="password" autocomplete="current-password">
   <button class="primary" id="loginBtn">Sign in</button>
@@ -94,19 +188,26 @@
 </section>
 
 <div id="app" class="hidden">
+  <div class="brand">
+    <span class="logo"><svg class="i" viewBox="0 0 32 32" fill="none"><path d="M8 11h16l-2 13H10z" stroke="white" stroke-width="2.6" stroke-linejoin="round"/><path d="M12 11V9a4 4 0 0 1 8 0v2" stroke="white" stroke-width="2.6"/></svg></span>
+    gostore
+  </div>
+  <div class="topbar">
+    <div class="crumbs" id="crumbs"></div>
+    <div class="who"><span id="whoami"></span><button class="ghost sm" id="logout" title="Sign out"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg></button></div>
+  </div>
   <nav>
-    <div class="brand">gostore</div>
-    <a data-view="buckets">Buckets</a>
-    <a data-view="identity">Access Keys</a>
-    <a data-view="info">Monitoring</a>
-    <div class="foot">
-      <div id="whoami"></div>
-      <a href="#" id="logout">Sign out</a>
-    </div>
+    <a data-view="buckets"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 7h14l-1.5 12.5A2 2 0 0 1 15.5 21h-7a2 2 0 0 1-2-1.5L5 7z"/><path d="M8 7V5a4 4 0 0 1 8 0v2"/></svg>Buckets</a>
+    <a data-view="identity"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8" cy="15" r="4"/><path d="M10.8 12.2 20 3M17 6l2 2M15 8l2 2"/></svg>Access Keys</a>
+    <a data-view="info"><svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 1 18 0"/><path d="M12 12l4-2"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/></svg>Monitoring</a>
+    <div class="grow"></div>
+    <div class="ver" id="ver"></div>
   </nav>
   <main id="main"></main>
 </div>
 
+<div id="scrim"></div>
+<aside id="drawer"></aside>
 <div id="toast"></div>
 <dialog id="modal"></dialog>
 
