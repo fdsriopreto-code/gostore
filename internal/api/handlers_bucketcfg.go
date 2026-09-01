@@ -300,3 +300,58 @@ func (s *Server) handlePutBucketNotification(w http.ResponseWriter, r *http.Requ
 	_ = s.bcfg.Update(bucket, func(c *bucketcfg.Config) { c.Notification = &n })
 	writeSuccessOK(w)
 }
+
+// --- bucket replication (native JSON) --------------------------
+
+func (s *Server) handleGetBucketReplication(w http.ResponseWriter, r *http.Request, bucket string) {
+	rules := s.bcfg.Get(bucket).Replication
+	if rules == nil {
+		rules = []bucketcfg.ReplicationRule{}
+	}
+	// Never echo secrets back.
+	out := make([]bucketcfg.ReplicationRule, len(rules))
+	copy(out, rules)
+	for i := range out {
+		if out[i].DestSecretKey != "" {
+			out[i].DestSecretKey = "***"
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handlePutBucketReplication(w http.ResponseWriter, r *http.Request, bucket string) {
+	if _, err := s.obj.GetBucketInfo(r.Context(), bucket); err != nil {
+		writeErrorResponse(w, r, toAPIError(err), "/"+bucket)
+		return
+	}
+	b, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	var rules []bucketcfg.ReplicationRule
+	if err := json.Unmarshal(b, &rules); err != nil {
+		writeErrorResponse(w, r, ErrMalformedXML, "/"+bucket)
+		return
+	}
+	for i := range rules {
+		if rules[i].DestBucket == "" {
+			writeErrorResponse(w, r, ErrInvalidArgument, "/"+bucket)
+			return
+		}
+	}
+	// Preserve an existing secret when the client sends the masked "***".
+	prev := s.bcfg.Get(bucket).Replication
+	for i := range rules {
+		if rules[i].DestSecretKey == "***" {
+			for _, p := range prev {
+				if p.ID == rules[i].ID {
+					rules[i].DestSecretKey = p.DestSecretKey
+				}
+			}
+		}
+	}
+	_ = s.bcfg.Update(bucket, func(c *bucketcfg.Config) { c.Replication = rules })
+	writeSuccessOK(w)
+}
+
+func (s *Server) handleDeleteBucketReplication(w http.ResponseWriter, r *http.Request, bucket string) {
+	_ = s.bcfg.Update(bucket, func(c *bucketcfg.Config) { c.Replication = nil })
+	writeSuccessNoContent(w)
+}

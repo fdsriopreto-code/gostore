@@ -473,6 +473,46 @@ func TestObjectLockHTTP(t *testing.T) {
 	}
 }
 
+func TestBucketReplicationLocal(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.Close()
+	do(t, srv, http.MethodPut, "/src", nil, nil).Body.Close()
+	do(t, srv, http.MethodPut, "/dst", nil, nil).Body.Close()
+
+	rule := `[{"id":"r1","prefix":"repl/","destBucket":"dst","deleteReplication":true}]`
+	if r := do(t, srv, http.MethodPut, "/src?replication", []byte(rule), nil); r.StatusCode/100 != 2 {
+		t.Fatalf("put replication: %d %s", r.StatusCode, readBody(t, r))
+	}
+
+	do(t, srv, http.MethodPut, "/src/repl/a.txt", []byte("mirror me"), nil).Body.Close()
+	do(t, srv, http.MethodPut, "/src/other/b.txt", []byte("do not"), nil).Body.Close()
+
+	// wait for async replication
+	var got string
+	for i := 0; i < 40; i++ {
+		r := do(t, srv, http.MethodGet, "/dst/repl/a.txt", nil, nil)
+		if r.StatusCode == 200 {
+			got = readBody(t, r)
+			break
+		}
+		r.Body.Close()
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got != "mirror me" {
+		t.Fatalf("replicated object = %q", got)
+	}
+	// prefix filter: other/ must not replicate
+	if r := do(t, srv, http.MethodGet, "/dst/other/b.txt", nil, nil); r.StatusCode != 404 {
+		t.Fatalf("non-matching prefix replicated: %d", r.StatusCode)
+	}
+
+	// GET replication config never leaks a secret
+	cfg := readBody(t, do(t, srv, http.MethodGet, "/src?replication", nil, nil))
+	if !strings.Contains(cfg, `"destBucket":"dst"`) {
+		t.Fatalf("get replication: %s", cfg)
+	}
+}
+
 func TestObjectTagging(t *testing.T) {
 	srv := newTestServer(t)
 	defer srv.Close()

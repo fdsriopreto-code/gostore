@@ -13,6 +13,7 @@ import (
 	"github.com/lojadopocket/gostore/internal/event"
 	"github.com/lojadopocket/gostore/internal/iam"
 	"github.com/lojadopocket/gostore/internal/object"
+	"github.com/lojadopocket/gostore/internal/replication"
 )
 
 // Server is the S3 + admin API HTTP handler.
@@ -22,6 +23,7 @@ type Server struct {
 	iam  *iam.Manager
 	bcfg *bucketcfg.Store
 	bus  *event.Bus
+	repl *replication.Manager
 
 	domainNames []string
 }
@@ -30,7 +32,7 @@ type ctxKeyAccessKey struct{}
 
 // NewServer builds the S3 API handler.
 func NewServer(cfg config.Config, obj object.Layer, im *iam.Manager, bc *bucketcfg.Store, bus *event.Bus) http.Handler {
-	s := &Server{cfg: cfg, obj: obj, iam: im, bcfg: bc, bus: bus}
+	s := &Server{cfg: cfg, obj: obj, iam: im, bcfg: bc, bus: bus, repl: replication.New(bc, obj)}
 	if v := strings.TrimSpace(os.Getenv("GOSTORE_DOMAIN")); v != "" {
 		for _, d := range strings.Split(v, ",") {
 			if d = strings.TrimSpace(d); d != "" {
@@ -161,6 +163,8 @@ func (s *Server) dispatchBucket(w http.ResponseWriter, r *http.Request, bucket s
 			s.handleGetBucketCORS(w, r, bucket)
 		case has("object-lock"):
 			s.handleGetBucketObjectLock(w, r, bucket)
+		case has("replication"):
+			s.handleGetBucketReplication(w, r, bucket)
 		case has("notification"):
 			s.handleGetBucketNotification(w, r, bucket)
 		case q["list-type"] != nil && q["list-type"][0] == "2":
@@ -182,6 +186,8 @@ func (s *Server) dispatchBucket(w http.ResponseWriter, r *http.Request, bucket s
 			s.handlePutBucketVersioning(w, r, bucket)
 		case has("object-lock"):
 			s.handlePutBucketObjectLock(w, r, bucket)
+		case has("replication"):
+			s.handlePutBucketReplication(w, r, bucket)
 		case has("acl") || has("lifecycle"):
 			writeSuccessOK(w) // accept-and-ignore
 		default:
@@ -195,6 +201,8 @@ func (s *Server) dispatchBucket(w http.ResponseWriter, r *http.Request, bucket s
 			s.handleDeleteBucketTagging(w, r, bucket)
 		case has("cors"):
 			s.handleDeleteBucketCORS(w, r, bucket)
+		case has("replication"):
+			s.handleDeleteBucketReplication(w, r, bucket)
 		case has("lifecycle"):
 			writeSuccessNoContent(w)
 		default:

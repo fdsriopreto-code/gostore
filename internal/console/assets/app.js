@@ -563,6 +563,18 @@ async function bucketSettings(b) {
       el("button", { class: "primary sm", onclick: async () => { try { await must(await api("PUT", "/" + b, { query: { cors: "" }, contentType: "application/xml", body: corsTa.value })); toast("CORS saved", "ok"); } catch (e) { toast(e.message, "err"); } } }, "Save CORS"),
       el("button", { class: "danger sm", onclick: async () => { await api("DELETE", "/" + b, { query: { cors: "" } }); corsTa.value = ""; toast("CORS removed", "ok"); } }, "Remove"))));
 
+  // replication
+  let repl = [];
+  try { const r = await api("GET", "/" + b, { query: { replication: "" } }); if (r.ok) repl = await r.json(); } catch {}
+  const rTa = el("textarea", {}, JSON.stringify(repl, null, 2));
+  sec("Replication", el("div", {},
+    el("p", { class: "muted", style: "font-size:12.5px;margin:.2em 0" },
+      'e.g. [{"id":"r1","prefix":"","destBucket":"backup","destEndpoint":"https://s3.other.com","destRegion":"us-east-1","destAccessKey":"…","destSecretKey":"…","deleteReplication":true}] — omit destEndpoint to replicate to a local bucket'),
+    rTa,
+    el("div", { class: "toolbar" },
+      el("button", { class: "primary sm", onclick: async () => { try { await must(await api("PUT", "/" + b, { query: { replication: "" }, contentType: "application/json", body: rTa.value })); toast("Replication saved", "ok"); } catch (e) { toast(e.message, "err"); } } }, "Save"),
+      el("button", { class: "danger sm", onclick: async () => { await api("DELETE", "/" + b, { query: { replication: "" } }); rTa.value = "[]"; toast("Replication removed", "ok"); } }, "Remove"))));
+
   // notifications
   let notif = { webhooks: [] };
   try { const r = await api("GET", "/" + b, { query: { notification: "" } }); if (r.ok) notif = await r.json(); } catch {}

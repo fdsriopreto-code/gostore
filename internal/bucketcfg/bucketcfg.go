@@ -22,6 +22,21 @@ type Config struct {
 	// ObjectLock, when set, means the bucket was created with Object Lock and
 	// optionally carries a default retention rule applied to new objects.
 	ObjectLock *ObjectLockConfig `json:"objectLock,omitempty"`
+	// Replication rules copy object writes/deletes to a destination.
+	Replication []ReplicationRule `json:"replication,omitempty"`
+}
+
+// ReplicationRule copies matching objects to a destination bucket — local
+// (DestEndpoint empty) or a remote S3-compatible endpoint.
+type ReplicationRule struct {
+	ID            string `json:"id"`
+	Prefix        string `json:"prefix,omitempty"`
+	DestBucket    string `json:"destBucket"`
+	DestEndpoint  string `json:"destEndpoint,omitempty"` // https://host  (empty = this server)
+	DestRegion    string `json:"destRegion,omitempty"`
+	DestAccessKey string `json:"destAccessKey,omitempty"`
+	DestSecretKey string `json:"destSecretKey,omitempty"`
+	DeleteRepl    bool   `json:"deleteReplication,omitempty"` // also replicate deletes
 }
 
 // ObjectLockConfig is the bucket default retention rule.

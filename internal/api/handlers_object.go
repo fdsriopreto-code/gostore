@@ -11,6 +11,7 @@ import (
 
 	"github.com/lojadopocket/gostore/internal/event"
 	"github.com/lojadopocket/gostore/internal/object"
+	"github.com/lojadopocket/gostore/internal/replication"
 )
 
 const maxSinglePutSize = 5 * 1024 * 1024 * 1024 // 5 GiB (S3 single-PUT limit)
@@ -142,15 +143,22 @@ func (s *Server) handleDeleteObject(w http.ResponseWriter, r *http.Request, buck
 	writeSuccessNoContent(w)
 }
 
-// notify publishes a bucket-notification event (no-op if no bus / no targets).
+// notify publishes a bucket-notification event and a replication event
+// (both no-ops when nothing is configured for the bucket).
 func (s *Server) notify(r *http.Request, kind event.Kind, bucket, key string, size int64, etag string) {
-	if s.bus == nil {
-		return
+	if s.bus != nil {
+		s.bus.Publish(event.Event{
+			Kind: kind, Bucket: bucket, Key: key, Size: size,
+			ETag: strings.Trim(etag, `"`), SourceIP: clientIP(r),
+		})
 	}
-	s.bus.Publish(event.Event{
-		Kind: kind, Bucket: bucket, Key: key, Size: size,
-		ETag: strings.Trim(etag, `"`), SourceIP: clientIP(r),
-	})
+	if s.repl != nil {
+		op := replication.Put
+		if kind == event.ObjectRemoved {
+			op = replication.Delete
+		}
+		s.repl.Publish(replication.Event{Op: op, Bucket: bucket, Key: key})
+	}
 }
 
 func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
