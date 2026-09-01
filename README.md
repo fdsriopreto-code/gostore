@@ -38,7 +38,10 @@ internal/
                    object lock (WORM), SSE-S3, tagging
   storage/         StorageAPI + LocalDisk (uma pasta = um "disco" do erasure)
   erasure/         Reed-Solomon (klauspost), Set (N discos) + Pool (N sets),
-                   xl.meta replicado, bitrot HighwayHash por stripe, quorum, heal
+                   xl.meta replicado, bitrot HighwayHash por stripe, quorum,
+                   heal, versioning + object-lock por vlog
+  cluster/         M6: RemoteDisk (erasure.Disk sobre RPC), RPCServer,
+                   lock por quorum (dsync-lite), parse de topologia
   iam/             usuários / service accounts / STS + iam/policy engine AWS
   kms/  sse/       master key local + AES-256-GCM em chunks (SSE-S3)
   bucketcfg/       config por bucket (policy, CORS, tags, notification, versioning,
@@ -63,12 +66,12 @@ volumes.
 | **M4** | Erasure coding | Reed-Solomon sobre N discos locais (N par, ≥4; paridade = N/2), `xl.meta` próprio replicado, bitrot HighwayHash por stripe/shard, quorum de leitura/escrita, reconstrução automática na leitura, multipart erasure-coded | ✅ |
 | **M5** | Server pools | 1 erasure set por argumento do `server`, todos formam 1 pool; placement por hash do nome; listagem faz merge entre sets | ✅ |
 | M6 | Distribuído | disco remoto via RPC, cluster multi-nó, lock distribuído (estilo dsync) | ⏳ **pendente** (precisa de protocolo RPC + consenso; não dá pra apressar com segurança) |
-| M6 | Distribuído | disco remoto via RPC, cluster multi-nó, lock distribuído (estilo dsync) | ⏳ **pendente** — fronteira honesta: precisa de protocolo entre nós + consenso, não dá pra apressar sem risco de split-brain |
+| **M6** | Distribuído | `internal/cluster`: `RemoteDisk` (erasure.Disk sobre RPC HTTP interno, bearer token), 1 erasure set abrangendo todos os nós, lock por quorum (dsync-lite: N/2+1 nós concedem, TTL + refresh). Args `http://host:port/data/d{1...4}`, `GOSTORE_CLUSTER_SELF` + `GOSTORE_CLUSTER_SECRET`. Membership estático; config IAM/bucket ainda por-nó. | ✅ (lite) |
 | **M7** | Healing (lite) | `POST /gostore/admin/v1/heal`: varre e reescreve `xl.meta`/shards perdidos ou corrompidos. Scanner de background faz ILM (heal proativo ainda não). | ✅ (parcial) |
 | **M8** | IAM | usuários, service accounts, engine de policy AWS própria (Effect/Action/NotAction/Resource/Condition, Principal, deny-vence), 5 canned policies, admin API `/gostore/admin/v1/`, estado JSON replicado. Grupos ainda não. | ✅ |
 | **M9** | STS | `AssumeRole` (credenciais temporárias em memória, policy do chamador ∩ policy inline). OIDC/LDAP ainda não. | ✅ (parcial) |
-| **M10** | Bucket features | **versioning real** (versões, `?versionId`, delete markers, `ListObjectVersions`), **Object Lock / WORM** (GOVERNANCE/COMPLIANCE + legal hold, bypass com check de IAM), **lifecycle/ILM** (expiração via scanner), tagging (bucket+objeto), bucket policy (com Principal → anônimo/público), CORS (preflight + headers). *Só no backend single-disk.* | ✅ |
-| **M11** | Encryption | **SSE-S3**: KMS local (master key) + AES-256-GCM em chunks de 64 KiB (stream + range), ETag = md5 do plaintext, transparente no PUT/GET. SSE-KMS/SSE-C ainda não; só single-disk. | ✅ (parcial) |
+| **M10** | Bucket features | **versioning real** (versões, `?versionId`, delete markers, `ListObjectVersions`) — **single-disk + erasure**. **Object Lock / WORM** (GOVERNANCE/COMPLIANCE + legal hold, bypass com check de IAM) — **single-disk + erasure**. **lifecycle/ILM** (expiração via scanner), tagging (bucket+objeto), bucket policy (Principal → anônimo/público), CORS. | ✅ |
+| **M11** | Encryption | **SSE-S3**: KMS local (master key) + AES-256-GCM em chunks de 64 KiB (stream + range), ETag = md5 do plaintext, transparente no PUT/GET. **single-disk + erasure** (erasure: single-part). SSE-KMS/SSE-C ainda não. | ✅ (parcial) |
 | **M12** | Eventos | notificação de bucket → webhooks (filtro evento/prefix/suffix, retry async) | ✅ |
 | **M13** | Replicação | cópia async de objetos (PUT/DELETE) pra bucket local ou endpoint S3 remoto (SigV4), filtro por prefixo. Sem fila de retry persistente. | ✅ (lite) |
 | **M14** | Console | SPA embutida (`go:embed`) servida em `/gostore/console/` na mesma origem da API; assina SigV4 no browser (Web Crypto). Buckets, objetos (drag&drop, drawer, links presigned, versões), usuários/service accounts, editores de policy/CORS/lifecycle/replicação/versioning, monitoramento + heal. | ✅ |
@@ -91,7 +94,24 @@ gostore server /data/d{1...4}
 
 Na mesma máquina, os N volumes podem ser diretórios do mesmo disco físico
 (dá proteção contra bitrot e reconstrução, mas não redundância física) ou —
-ideal — N discos/mounts separados. Cluster multi-nó é M6.
+ideal — N discos/mounts separados.
+
+**Cluster multi-nó (M6):** passe endpoints `http(s)://host:port/path` — os
+discos de todos os nós formam **um** erasure set. Em cada nó:
+
+```bash
+export GOSTORE_CLUSTER_SECRET=um-segredo-compartilhado
+# no node1:
+GOSTORE_CLUSTER_SELF=http://node1:9000 gostore server \
+  http://node1:9000/data/d{1...4} http://node2:9000/data/d{1...4}
+# no node2 (mesmos args, só muda o SELF):
+GOSTORE_CLUSTER_SELF=http://node2:9000 gostore server \
+  http://node1:9000/data/d{1...4} http://node2:9000/data/d{1...4}
+```
+
+8 discos → 4 dados + 4 paridade → sobrevive à perda de um nó inteiro. O
+tráfego entre nós (`/gostore/internal/`) usa bearer token — rode numa rede
+confiável ou atrás de mTLS. Membership é estático.
 
 ### Local
 
@@ -264,16 +284,17 @@ notificações via webhook.
 
 ## O que **não** funciona ainda
 
-- **Cluster multi-nó** (M6) — hoje é single-node (1+ discos locais no mesmo
-  host). Precisa de RPC entre nós + lock distribuído.
-- **Paridade do backend erasure** — versioning, Object Lock e SSE hoje só
-  existem no backend single-disk; no erasure o bucket é sempre unversioned
-  e sem criptografia.
-- **SSE-KMS / SSE-C** (só SSE-S3), KMS externo.
+- **Cluster (M6-lite) tem limites**: membership estático (reiniciar com a
+  mesma topologia); config IAM/bucket é replicada só nos discos locais de
+  cada nó — mudanças de usuário/policy precisam ser feitas em todos os nós
+  ou com um volume de config compartilhado. Sem rebalanceamento ao
+  adicionar nós.
+- **SSE-KMS / SSE-C** (só SSE-S3), KMS externo. Multipart no erasure não
+  criptografa (single-part sim).
 - **Grupos IAM**, `AssumeRoleWithWebIdentity` (OIDC/LDAP).
 - Lifecycle: transições de storage class (só expiração).
 - Replicação: sem fila de retry persistente (best-effort, 3 tentativas).
-- Heal proativo de background (o scanner só faz ILM).
+- Heal proativo de background (o scanner só faz ILM; heal é sob demanda).
 
 ## Formato on-disk
 
