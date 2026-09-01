@@ -39,6 +39,28 @@ type verEntry struct {
 	UserMeta     map[string]string `json:"userMeta,omitempty"`
 	UserTags     string            `json:"userTags,omitempty"`
 	Parts        []objMetaPart     `json:"parts,omitempty"`
+
+	// Object Lock (WORM), per version.
+	LockMode    string    `json:"lockMode,omitempty"` // GOVERNANCE | COMPLIANCE
+	RetainUntil time.Time `json:"retainUntil,omitempty"`
+	LegalHold   bool      `json:"legalHold,omitempty"`
+}
+
+// lockBlocks reports whether this version may not be deleted/overwritten now.
+func (e verEntry) lockBlocks(bypassGovernance bool) bool {
+	if e.LegalHold {
+		return true
+	}
+	if e.RetainUntil.IsZero() || !time.Now().Before(e.RetainUntil) {
+		return false
+	}
+	switch e.LockMode {
+	case "COMPLIANCE":
+		return true
+	case "GOVERNANCE":
+		return !bypassGovernance
+	}
+	return false
 }
 
 func (f *FS) verDir(bucket, obj string) string {
@@ -155,12 +177,23 @@ func (f *FS) putVersion(_ context.Context, bucket, obj string, data *object.PutO
 	if !opts.MTime.IsZero() {
 		now = opts.MTime.UTC()
 	}
+	// Suspended overwrite of a locked "null" version is refused.
+	if opts.VersionSuspended {
+		for _, ex := range idx {
+			if ex.ID == nullVersionID && ex.lockBlocks(opts.BypassGovernance) {
+				return object.ObjectInfo{}, object.ErrObjectLocked
+			}
+		}
+	}
 	e := verEntry{
 		ID: id, Size: n, ETag: md5hex, ModTime: now,
 		ContentType: opts.UserDefined["content-type"],
 		ContentEnc:  opts.UserDefined["content-encoding"],
 		UserMeta:    stripReserved(opts.UserDefined),
 		UserTags:    opts.UserTags,
+		LockMode:    opts.LockMode,
+		RetainUntil: opts.LockRetainUntil,
+		LegalHold:   opts.LockLegalHold == "ON",
 	}
 	idx = replaceOrAppend(idx, e, opts.VersionSuspended)
 	if err := f.writeVerIndex(bucket, obj, idx); err != nil {
@@ -186,7 +219,7 @@ func replaceOrAppend(idx []verEntry, e verEntry, suspended bool) []verEntry {
 
 // deleteVersion adds a delete marker (versionID == "") or permanently removes
 // a specific version.
-func (f *FS) deleteVersion(_ context.Context, bucket, obj, versionID string, suspended bool) (object.ObjectInfo, error) {
+func (f *FS) deleteVersion(_ context.Context, bucket, obj, versionID string, suspended, bypassGovernance bool) (object.ObjectInfo, error) {
 	lk := f.NewNSLock(bucket, obj)
 	c, _ := lk.GetLock(context.Background(), 0)
 	defer lk.Unlock(c)
@@ -225,6 +258,9 @@ func (f *FS) deleteVersion(_ context.Context, bucket, obj, versionID string, sus
 	// permanent delete of one version
 	for i := range idx {
 		if idx[i].ID == versionID {
+			if idx[i].lockBlocks(bypassGovernance) {
+				return object.ObjectInfo{}, object.ErrObjectLocked
+			}
 			if !idx[i].DeleteMarker {
 				_ = os.Remove(f.verDataPath(bucket, obj, versionID))
 			}

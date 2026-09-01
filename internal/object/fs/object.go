@@ -333,7 +333,7 @@ func (f *FS) DeleteObject(ctx context.Context, bucket, obj string, opts object.O
 		return object.ObjectInfo{}, err
 	}
 	if opts.Versioned || opts.VersionSuspended || opts.VersionID != "" {
-		return f.deleteVersion(ctx, bucket, obj, opts.VersionID, opts.VersionSuspended)
+		return f.deleteVersion(ctx, bucket, obj, opts.VersionID, opts.VersionSuspended, opts.BypassGovernance)
 	}
 	lk := f.NewNSLock(bucket, obj)
 	ctx2, _ := lk.GetLock(context.Background(), 0)

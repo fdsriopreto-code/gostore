@@ -41,6 +41,10 @@ func toAPIError(err error) APIErrorCode {
 		return ErrInvalidPartOrder
 	case errors.Is(err, object.ErrPartTooSmall):
 		return ErrEntityTooSmall
+	case errors.Is(err, object.ErrObjectLocked):
+		return ErrObjectLockConflict
+	case errors.Is(err, object.ErrNotVersioned):
+		return ErrInvalidBucketState
 	case errors.Is(err, object.ErrNotImplemented):
 		return ErrNotImplemented
 	case errors.Is(err, object.ErrStorageFull):

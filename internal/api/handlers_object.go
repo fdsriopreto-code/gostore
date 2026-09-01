@@ -226,19 +226,55 @@ func writeObjectHeaders(w http.ResponseWriter, oi object.ObjectInfo, region stri
 	}
 }
 
-// vopts builds ObjectOptions carrying the bucket's versioning state and any
-// ?versionId from the request.
+// vopts builds ObjectOptions carrying the bucket's versioning state, any
+// ?versionId, and object-lock parameters (request headers, else the bucket's
+// default retention rule).
 func (s *Server) vopts(bucket string, r *http.Request) object.ObjectOptions {
 	o := object.ObjectOptions{VersionID: r.URL.Query().Get("versionId")}
+	var lockCfg *bucketcfgObjectLock
 	if s.bcfg != nil {
-		switch s.bcfg.Get(bucket).Versioning {
+		c := s.bcfg.Get(bucket)
+		switch c.Versioning {
 		case "Enabled":
 			o.Versioned = true
 		case "Suspended":
 			o.VersionSuspended = true
 		}
+		if c.ObjectLock != nil && c.ObjectLock.Enabled {
+			o.Versioned = true
+			lockCfg = &bucketcfgObjectLock{c.ObjectLock.DefaultMode, c.ObjectLock.DefaultDays, c.ObjectLock.DefaultYears}
+		}
+	}
+
+	if m := r.Header.Get("x-amz-object-lock-mode"); m != "" {
+		o.LockMode = m
+	}
+	if d := r.Header.Get("x-amz-object-lock-retain-until-date"); d != "" {
+		if t, err := time.Parse(time.RFC3339, d); err == nil {
+			o.LockRetainUntil = t
+		}
+	}
+	if lh := r.Header.Get("x-amz-object-lock-legal-hold"); lh != "" {
+		o.LockLegalHold = lh
+	}
+	// Apply the bucket default only when the request itself said nothing.
+	if o.LockMode == "" && lockCfg != nil {
+		d := time.Duration(lockCfg.days)*24*time.Hour + time.Duration(lockCfg.years)*365*24*time.Hour
+		if lockCfg.mode != "" && d > 0 {
+			o.LockMode = lockCfg.mode
+			o.LockRetainUntil = time.Now().UTC().Add(d)
+		}
+	}
+	if r.Header.Get("x-amz-bypass-governance-retention") == "true" {
+		o.BypassGovernance = s.bypassAllowed(r, bucket, "", accessKeyFrom(r))
 	}
 	return o
+}
+
+type bucketcfgObjectLock struct {
+	mode  string
+	days  int
+	years int
 }
 
 // bodySize returns the number of raw object bytes to expect. For aws-chunked

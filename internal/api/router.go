@@ -159,6 +159,8 @@ func (s *Server) dispatchBucket(w http.ResponseWriter, r *http.Request, bucket s
 			s.handleGetBucketTagging(w, r, bucket)
 		case has("cors"):
 			s.handleGetBucketCORS(w, r, bucket)
+		case has("object-lock"):
+			s.handleGetBucketObjectLock(w, r, bucket)
 		case has("notification"):
 			s.handleGetBucketNotification(w, r, bucket)
 		case q["list-type"] != nil && q["list-type"][0] == "2":
@@ -178,7 +180,9 @@ func (s *Server) dispatchBucket(w http.ResponseWriter, r *http.Request, bucket s
 			s.handlePutBucketNotification(w, r, bucket)
 		case has("versioning"):
 			s.handlePutBucketVersioning(w, r, bucket)
-		case has("acl") || has("lifecycle") || has("object-lock"):
+		case has("object-lock"):
+			s.handlePutBucketObjectLock(w, r, bucket)
+		case has("acl") || has("lifecycle"):
 			writeSuccessOK(w) // accept-and-ignore
 		default:
 			s.handleCreateBucket(w, r, bucket)
@@ -222,6 +226,14 @@ func (s *Server) dispatchObject(w http.ResponseWriter, r *http.Request, bucket, 
 			s.handleGetObjectTagging(w, r, bucket, object)
 			return
 		}
+		if has("retention") {
+			s.handleGetObjectRetention(w, r, bucket, object)
+			return
+		}
+		if has("legal-hold") {
+			s.handleGetObjectLegalHold(w, r, bucket, object)
+			return
+		}
 		if has("acl") {
 			writeErrorResponse(w, r, ErrNotImplemented, res)
 			return
@@ -244,6 +256,14 @@ func (s *Server) dispatchObject(w http.ResponseWriter, r *http.Request, bucket, 
 		}
 		if has("tagging") {
 			s.handlePutObjectTagging(w, r, bucket, object)
+			return
+		}
+		if has("retention") {
+			s.handlePutObjectRetention(w, r, bucket, object)
+			return
+		}
+		if has("legal-hold") {
+			s.handlePutObjectLegalHold(w, r, bucket, object)
 			return
 		}
 		if has("acl") {

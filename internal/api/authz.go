@@ -60,6 +60,14 @@ func first(v []string) []string {
 	return v[:1]
 }
 
+// accessKeyFrom returns the authenticated access key stashed by handleS3.
+func accessKeyFrom(r *http.Request) string {
+	if v, ok := r.Context().Value(ctxKeyAccessKey{}).(string); ok {
+		return v
+	}
+	return ""
+}
+
 func clientIP(r *http.Request) string {
 	if h := r.Header.Get("X-Forwarded-For"); h != "" {
 		if i := indexByteStr(h, ','); i >= 0 {

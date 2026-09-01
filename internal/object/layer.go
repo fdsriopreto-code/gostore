@@ -57,6 +57,13 @@ type Layer interface {
 	GetObjectTags(ctx context.Context, bucket, object string, opts ObjectOptions) (string, error)
 	DeleteObjectTags(ctx context.Context, bucket, object string, opts ObjectOptions) error
 
+	// Object Lock (WORM) — per object version. versionID "" targets the
+	// latest version.
+	PutObjectRetention(ctx context.Context, bucket, object, versionID, mode string, until time.Time, bypassGovernance bool) error
+	GetObjectRetention(ctx context.Context, bucket, object, versionID string) (mode string, until time.Time, err error)
+	PutObjectLegalHold(ctx context.Context, bucket, object, versionID, status string) error
+	GetObjectLegalHold(ctx context.Context, bucket, object, versionID string) (status string, err error)
+
 	CopyObject(ctx context.Context, srcBucket, srcObject, dstBucket, dstObject string, srcInfo ObjectInfo, srcOpts, dstOpts ObjectOptions) (ObjectInfo, error)
 
 	DeleteObject(ctx context.Context, bucket, object string, opts ObjectOptions) (ObjectInfo, error)

@@ -19,6 +19,17 @@ type Config struct {
 	Notification *Notification     `json:"notification,omitempty"`
 	// Versioning is "", "Enabled" or "Suspended" (S3 VersioningConfiguration).
 	Versioning string `json:"versioning,omitempty"`
+	// ObjectLock, when set, means the bucket was created with Object Lock and
+	// optionally carries a default retention rule applied to new objects.
+	ObjectLock *ObjectLockConfig `json:"objectLock,omitempty"`
+}
+
+// ObjectLockConfig is the bucket default retention rule.
+type ObjectLockConfig struct {
+	Enabled      bool   `json:"enabled"`
+	DefaultMode  string `json:"defaultMode,omitempty"` // GOVERNANCE | COMPLIANCE
+	DefaultDays  int    `json:"defaultDays,omitempty"`
+	DefaultYears int    `json:"defaultYears,omitempty"`
 }
 
 // CORSRule mirrors an S3 CORS rule.

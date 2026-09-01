@@ -109,6 +109,12 @@ type ObjectOptions struct {
 	Versioned        bool
 	VersionSuspended bool
 
+	// Object Lock (WORM). LockMode is "GOVERNANCE" | "COMPLIANCE" | "".
+	LockMode         string
+	LockRetainUntil  time.Time
+	LockLegalHold    string // "ON" | "OFF" | ""
+	BypassGovernance bool   // s3:BypassGovernanceRetention + explicit header
+
 	// Server-side encryption context (M11) — opaque for now.
 	ServerSideEncryption any
 

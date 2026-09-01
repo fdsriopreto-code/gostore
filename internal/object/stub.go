@@ -58,6 +58,18 @@ func (*Stub) GetObjectTags(context.Context, string, string, ObjectOptions) (stri
 func (*Stub) DeleteObjectTags(context.Context, string, string, ObjectOptions) error {
 	return ErrNotImplemented
 }
+func (*Stub) PutObjectRetention(context.Context, string, string, string, string, time.Time, bool) error {
+	return ErrNotImplemented
+}
+func (*Stub) GetObjectRetention(context.Context, string, string, string) (string, time.Time, error) {
+	return "", time.Time{}, ErrNotImplemented
+}
+func (*Stub) PutObjectLegalHold(context.Context, string, string, string, string) error {
+	return ErrNotImplemented
+}
+func (*Stub) GetObjectLegalHold(context.Context, string, string, string) (string, error) {
+	return "", ErrNotImplemented
+}
 func (*Stub) CopyObject(context.Context, string, string, string, string, ObjectInfo, ObjectOptions, ObjectOptions) (ObjectInfo, error) {
 	return ObjectInfo{}, ErrNotImplemented
 }

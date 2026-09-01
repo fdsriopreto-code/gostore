@@ -416,6 +416,63 @@ func TestSSES3HTTP(t *testing.T) {
 	}
 }
 
+func TestObjectLockHTTP(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.Close()
+
+	// create bucket with object lock
+	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/locked", nil)
+	req.Header.Set("x-amz-bucket-object-lock-enabled", "true")
+	signV4(t, req, nil)
+	if r, _ := srv.Client().Do(req); r.StatusCode != 200 {
+		t.Fatalf("create locked bucket: %d", r.StatusCode)
+	}
+
+	// bucket object-lock config is reported
+	if b := readBody(t, do(t, srv, http.MethodGet, "/locked?object-lock", nil, nil)); !strings.Contains(b, "<ObjectLockEnabled>Enabled</ObjectLockEnabled>") {
+		t.Fatalf("get object-lock: %s", b)
+	}
+
+	// put an object with GOVERNANCE retention 1 day out
+	until := time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)
+	pr := do(t, srv, http.MethodPut, "/locked/f", []byte("payload"), map[string]string{
+		"x-amz-object-lock-mode":              "GOVERNANCE",
+		"x-amz-object-lock-retain-until-date": until,
+	})
+	vid := pr.Header.Get("x-amz-version-id")
+	pr.Body.Close()
+	if vid == "" {
+		t.Fatal("no version id")
+	}
+
+	// retention is readable
+	if b := readBody(t, do(t, srv, http.MethodGet, "/locked/f?retention&versionId="+vid, nil, nil)); !strings.Contains(b, "<Mode>GOVERNANCE</Mode>") {
+		t.Fatalf("get retention: %s", b)
+	}
+	// delete of the protected version is denied
+	if r := do(t, srv, http.MethodDelete, "/locked/f?versionId="+vid, nil, nil); r.StatusCode != 403 {
+		t.Fatalf("locked delete: want 403, got %d", r.StatusCode)
+	}
+	// with the bypass header (root has s3:BypassGovernanceRetention) it succeeds
+	if r := do(t, srv, http.MethodDelete, "/locked/f?versionId="+vid, nil,
+		map[string]string{"x-amz-bypass-governance-retention": "true"}); r.StatusCode != 204 {
+		t.Fatalf("bypass delete: want 204, got %d %s", r.StatusCode, readBody(t, r))
+	}
+
+	// legal hold
+	p2 := do(t, srv, http.MethodPut, "/locked/g", []byte("g"), nil)
+	v2 := p2.Header.Get("x-amz-version-id")
+	p2.Body.Close()
+	if r := do(t, srv, http.MethodPut, "/locked/g?legal-hold&versionId="+v2,
+		[]byte(`<LegalHold><Status>ON</Status></LegalHold>`), nil); r.StatusCode/100 != 2 {
+		t.Fatalf("put legal hold: %d", r.StatusCode)
+	}
+	if r := do(t, srv, http.MethodDelete, "/locked/g?versionId="+v2, nil,
+		map[string]string{"x-amz-bypass-governance-retention": "true"}); r.StatusCode != 403 {
+		t.Fatalf("legal-hold delete: want 403, got %d", r.StatusCode)
+	}
+}
+
 func TestObjectTagging(t *testing.T) {
 	srv := newTestServer(t)
 	defer srv.Close()

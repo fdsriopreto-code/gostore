@@ -35,6 +35,12 @@ func (s *Server) handleCreateBucket(w http.ResponseWriter, r *http.Request, buck
 		writeErrorResponse(w, r, toAPIError(err), "/"+bucket)
 		return
 	}
+	if lockEnabled && s.bcfg != nil {
+		_ = s.bcfg.Update(bucket, func(c *bucketcfg.Config) {
+			c.ObjectLock = &bucketcfg.ObjectLockConfig{Enabled: true}
+			c.Versioning = "Enabled"
+		})
+	}
 	w.Header().Set("Location", "/"+bucket)
 	writeSuccessOK(w)
 }

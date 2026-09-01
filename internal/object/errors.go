@@ -29,6 +29,9 @@ var (
 	ErrPartTooSmall     = errors.New("object: part smaller than the minimum allowed size")
 	ErrInvalidPartOrder = errors.New("object: parts not in ascending order")
 
+	ErrObjectLocked = errors.New("object: blocked by object-lock retention or legal hold")
+	ErrNotVersioned = errors.New("object: bucket is not versioned")
+
 	ErrStorageFull   = errors.New("object: storage backend is full")
 	ErrReadQuorum    = errors.New("object: not enough healthy disks for read quorum")
 	ErrWriteQuorum   = errors.New("object: not enough healthy disks for write quorum")
