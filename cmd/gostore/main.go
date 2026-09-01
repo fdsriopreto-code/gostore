@@ -252,22 +252,21 @@ func consolePlaceholder(cfg config.Config) http.Handler {
 <h1 style="margin-bottom:.2rem">gostore</h1>
 <p style="color:#666;margin-top:0">S3-compatible object storage &mdash; version %s</p>
 <table style="border-collapse:collapse">
-<tr><td style="padding:.2rem 1rem .2rem 0;color:#666">S3 API</td><td><code>%s</code></td></tr>
+<tr><td style="padding:.2rem 1rem .2rem 0;color:#666">S3 API port</td><td><code>%s</code></td></tr>
+<tr><td style="padding:.2rem 1rem .2rem 0;color:#666">Console port</td><td><code>%s</code> (this page)</td></tr>
 <tr><td style="padding:.2rem 1rem .2rem 0;color:#666">Region</td><td><code>%s</code></td></tr>
 <tr><td style="padding:.2rem 1rem .2rem 0;color:#666">Mode</td><td><code>%s</code></td></tr>
-<tr><td style="padding:.2rem 1rem .2rem 0;color:#666">Health</td><td><a href="//%s/gostore/health/ready">/gostore/health/ready</a></td></tr>
 </table>
-<p style="margin-top:1.5rem">This is a status page. The S3 API on <code>%s</code> requires AWS
-Signature V4 &mdash; use <code>mc</code>, the AWS CLI/SDKs, or any S3 client
-(path-style). A full web console is planned for milestone M14.</p>
-</body>`, version, cfg.Address, cfg.Region, modeString(cfg), stripColon(cfg.ConsoleAddress), cfg.Address)
+<p style="margin-top:1.5rem">Status page only. Point your reverse proxy / PaaS at the
+<strong>S3 API port (%s)</strong> &mdash; that port also serves the health and
+self-test endpoints:</p>
+<ul>
+<li><code>GET /gostore/health/live</code></li>
+<li><code>GET /gostore/health/ready</code></li>
+<li><code>GET /gostore/health/selftest</code> &mdash; full write/read/verify/delete round-trip</li>
+</ul>
+<p>The S3 API itself requires AWS Signature V4 &mdash; use <code>mc</code>, the AWS
+CLI/SDKs, or any S3 client (path-style). A full web console is milestone M14.</p>
+</body>`, version, cfg.Address, cfg.ConsoleAddress, cfg.Region, modeString(cfg), cfg.Address)
 	})
-}
-
-// stripColon turns ":9001" into "localhost:9001" for a usable link host.
-func stripColon(addr string) string {
-	if strings.HasPrefix(addr, ":") {
-		return "localhost" + addr
-	}
-	return addr
 }
