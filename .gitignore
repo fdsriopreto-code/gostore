@@ -1,0 +1,22 @@
+# build output
+/dist/
+/gostore
+/gostore.exe
+*.exe
+*.test
+*.out
+
+# local data volumes for dev
+/data/
+/data*/
+/.dev-volumes/
+
+# env / secrets
+.env
+*.local
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

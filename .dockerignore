@@ -1,0 +1,12 @@
+.git
+.gitignore
+dist/
+data/
+data*/
+*.exe
+*.test
+*.out
+README.md
+deploy/
+.vscode/
+.idea/

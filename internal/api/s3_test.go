@@ -1,0 +1,386 @@
+package api_test
+
+import (
+	"bytes"
+	"crypto/hmac"
+	"crypto/md5"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/xml"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/lojadopocket/gostore/internal/api"
+	"github.com/lojadopocket/gostore/internal/auth"
+	"github.com/lojadopocket/gostore/internal/config"
+	fsbackend "github.com/lojadopocket/gostore/internal/object/fs"
+)
+
+const (
+	testAK = "gostoreadmin"
+	testSK = "gostoreadmin123"
+	region = "us-east-1"
+)
+
+func newTestServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	backend, err := fsbackend.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Region = region
+	creds := auth.NewRoot(testAK, testSK)
+	return httptest.NewServer(api.NewServer(cfg, backend, creds))
+}
+
+// signV4 signs req (header auth) with a fixed set of signed headers.
+func signV4(t *testing.T, req *http.Request, payload []byte) {
+	t.Helper()
+	now := time.Now().UTC()
+	amzDate := now.Format("20060102T150405Z")
+	dateStamp := now.Format("20060102")
+	payloadHash := sha256Hex(payload)
+
+	req.Header.Set("X-Amz-Date", amzDate)
+	req.Header.Set("X-Amz-Content-Sha256", payloadHash)
+
+	host := req.URL.Host
+	signed := "host;x-amz-content-sha256;x-amz-date"
+	canonHeaders := "host:" + host + "\n" +
+		"x-amz-content-sha256:" + payloadHash + "\n" +
+		"x-amz-date:" + amzDate + "\n"
+	canonReq := req.Method + "\n" +
+		auth.EncodePath(req.URL.Path) + "\n" +
+		auth.CanonicalQuery(req.URL.Query()) + "\n" +
+		canonHeaders + "\n" +
+		signed + "\n" +
+		payloadHash
+	scope := dateStamp + "/" + region + "/s3/aws4_request"
+	sts := "AWS4-HMAC-SHA256\n" + amzDate + "\n" + scope + "\n" + sha256Hex([]byte(canonReq))
+	key := auth.SigningKey(testSK, dateStamp, region, "s3")
+	sig := hex.EncodeToString(hmacSHA256(key, sts))
+	req.Header.Set("Authorization",
+		"AWS4-HMAC-SHA256 Credential="+testAK+"/"+scope+
+			", SignedHeaders="+signed+", Signature="+sig)
+}
+
+func sha256Hex(b []byte) string { s := sha256.Sum256(b); return hex.EncodeToString(s[:]) }
+func hmacSHA256(k []byte, d string) []byte {
+	h := hmac.New(sha256.New, k)
+	h.Write([]byte(d))
+	return h.Sum(nil)
+}
+
+func do(t *testing.T, srv *httptest.Server, method, path string, body []byte, hdr map[string]string) *http.Response {
+	t.Helper()
+	var r io.Reader
+	if body != nil {
+		r = bytes.NewReader(body)
+	}
+	req, err := http.NewRequest(method, srv.URL+path, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != nil {
+		req.ContentLength = int64(len(body))
+	}
+	for k, v := range hdr {
+		req.Header.Set(k, v)
+	}
+	signV4(t, req, body)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	return resp
+}
+
+func readBody(t *testing.T, resp *http.Response) string {
+	t.Helper()
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	return string(b)
+}
+
+func TestS3EndToEnd(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.Close()
+
+	// unsigned request is rejected
+	{
+		resp, err := srv.Client().Get(srv.URL + "/")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("unsigned ListBuckets: want 403, got %d", resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+
+	// create bucket
+	if resp := do(t, srv, http.MethodPut, "/mybucket", []byte{}, nil); resp.StatusCode != 200 {
+		t.Fatalf("CreateBucket: %d %s", resp.StatusCode, readBody(t, resp))
+	}
+
+	// list buckets
+	{
+		resp := do(t, srv, http.MethodGet, "/", nil, nil)
+		body := readBody(t, resp)
+		if resp.StatusCode != 200 || !strings.Contains(body, "<Name>mybucket</Name>") {
+			t.Fatalf("ListBuckets: %d %s", resp.StatusCode, body)
+		}
+	}
+
+	// put object
+	payload := []byte("the quick brown fox")
+	{
+		resp := do(t, srv, http.MethodPut, "/mybucket/animals/fox.txt", payload,
+			map[string]string{"Content-Type": "text/plain", "x-amz-meta-color": "brown"})
+		if resp.StatusCode != 200 {
+			t.Fatalf("PutObject: %d %s", resp.StatusCode, readBody(t, resp))
+		}
+		sum := md5hex(payload)
+		if got := strings.Trim(resp.Header.Get("ETag"), `"`); got != sum {
+			t.Fatalf("PutObject ETag: got %s want %s", got, sum)
+		}
+		resp.Body.Close()
+	}
+
+	// head object
+	{
+		resp := do(t, srv, http.MethodHead, "/mybucket/animals/fox.txt", nil, nil)
+		if resp.StatusCode != 200 {
+			t.Fatalf("HeadObject: %d", resp.StatusCode)
+		}
+		if resp.Header.Get("x-amz-meta-color") != "brown" {
+			t.Fatalf("HeadObject missing user meta: %v", resp.Header)
+		}
+		if resp.ContentLength != int64(len(payload)) {
+			t.Fatalf("HeadObject content-length: %d", resp.ContentLength)
+		}
+		resp.Body.Close()
+	}
+
+	// get object
+	{
+		resp := do(t, srv, http.MethodGet, "/mybucket/animals/fox.txt", nil, nil)
+		body := readBody(t, resp)
+		if resp.StatusCode != 200 || body != string(payload) {
+			t.Fatalf("GetObject: %d %q", resp.StatusCode, body)
+		}
+	}
+
+	// range get
+	{
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/mybucket/animals/fox.txt", nil)
+		req.Header.Set("Range", "bytes=4-8")
+		signV4(t, req, nil)
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := readBody(t, resp)
+		if resp.StatusCode != http.StatusPartialContent || body != "quick" {
+			t.Fatalf("Range GET: %d %q (cr=%s)", resp.StatusCode, body, resp.Header.Get("Content-Range"))
+		}
+	}
+
+	// list objects v2
+	{
+		resp := do(t, srv, http.MethodGet, "/mybucket?list-type=2&prefix=animals/", nil, nil)
+		body := readBody(t, resp)
+		if resp.StatusCode != 200 || !strings.Contains(body, "<Key>animals/fox.txt</Key>") {
+			t.Fatalf("ListObjectsV2: %d %s", resp.StatusCode, body)
+		}
+	}
+
+	// multipart upload
+	{
+		resp := do(t, srv, http.MethodPost, "/mybucket/big.bin?uploads", nil, nil)
+		body := readBody(t, resp)
+		if resp.StatusCode != 200 {
+			t.Fatalf("NewMultipartUpload: %d %s", resp.StatusCode, body)
+		}
+		var init struct {
+			UploadID string `xml:"UploadId"`
+		}
+		_ = xml.Unmarshal([]byte(body), &init)
+		if init.UploadID == "" {
+			t.Fatalf("no upload id in %s", body)
+		}
+
+		part1 := bytes.Repeat([]byte("Z"), 5*1024*1024+10)
+		part2 := []byte("!end!")
+		r1 := do(t, srv, http.MethodPut,
+			fmt.Sprintf("/mybucket/big.bin?partNumber=1&uploadId=%s", init.UploadID), part1, nil)
+		e1 := strings.Trim(r1.Header.Get("ETag"), `"`)
+		r1.Body.Close()
+		r2 := do(t, srv, http.MethodPut,
+			fmt.Sprintf("/mybucket/big.bin?partNumber=2&uploadId=%s", init.UploadID), part2, nil)
+		e2 := strings.Trim(r2.Header.Get("ETag"), `"`)
+		r2.Body.Close()
+		if r1.StatusCode != 200 || r2.StatusCode != 200 {
+			t.Fatalf("UploadPart: %d %d", r1.StatusCode, r2.StatusCode)
+		}
+
+		cmu := fmt.Sprintf(`<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part><Part><PartNumber>2</PartNumber><ETag>%s</ETag></Part></CompleteMultipartUpload>`, e1, e2)
+		resp = do(t, srv, http.MethodPost,
+			fmt.Sprintf("/mybucket/big.bin?uploadId=%s", init.UploadID), []byte(cmu), nil)
+		body = readBody(t, resp)
+		if resp.StatusCode != 200 || !strings.Contains(body, "CompleteMultipartUploadResult") {
+			t.Fatalf("CompleteMultipartUpload: %d %s", resp.StatusCode, body)
+		}
+
+		resp = do(t, srv, http.MethodGet, "/mybucket/big.bin", nil, nil)
+		got := readBody(t, resp)
+		if len(got) != len(part1)+len(part2) {
+			t.Fatalf("assembled size %d want %d", len(got), len(part1)+len(part2))
+		}
+	}
+
+	// delete object + bucket
+	{
+		if resp := do(t, srv, http.MethodDelete, "/mybucket/animals/fox.txt", nil, nil); resp.StatusCode != 204 {
+			t.Fatalf("DeleteObject: %d", resp.StatusCode)
+		}
+		if resp := do(t, srv, http.MethodDelete, "/mybucket/big.bin", nil, nil); resp.StatusCode != 204 {
+			t.Fatalf("DeleteObject: %d", resp.StatusCode)
+		}
+		if resp := do(t, srv, http.MethodDelete, "/mybucket", nil, nil); resp.StatusCode != 204 {
+			t.Fatalf("DeleteBucket: %d %s", resp.StatusCode, readBody(t, resp))
+		}
+	}
+}
+
+func TestBadSignatureRejected(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.Close()
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/", nil)
+	req.Header.Set("X-Amz-Date", time.Now().UTC().Format("20060102T150405Z"))
+	req.Header.Set("X-Amz-Content-Sha256", sha256Hex(nil))
+	req.Header.Set("Authorization",
+		"AWS4-HMAC-SHA256 Credential="+testAK+"/20250101/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=deadbeef")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("want 403 for bad signature, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func md5hex(b []byte) string {
+	h := md5.New()
+	h.Write(b)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+const emptySHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+// TestStreamingChunkedUpload exercises the STREAMING-AWS4-HMAC-SHA256-PAYLOAD
+// path that real AWS SDKs / the CLI use for PutObject.
+func TestStreamingChunkedUpload(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.Close()
+
+	if resp := do(t, srv, http.MethodPut, "/cbucket", []byte{}, nil); resp.StatusCode != 200 {
+		t.Fatalf("CreateBucket: %d", resp.StatusCode)
+	}
+
+	raw := bytes.Repeat([]byte("chunked-data-"), 5000) // ~65 KB, multiple chunks
+	chunkSize := 16 * 1024
+
+	now := time.Now().UTC()
+	amzDate := now.Format("20060102T150405Z")
+	dateStamp := now.Format("20060102")
+	scope := dateStamp + "/" + region + "/s3/aws4_request"
+	signingKey := auth.SigningKey(testSK, dateStamp, region, "s3")
+
+	// Build encoded body first so we know its length.
+	var chunks [][]byte
+	for off := 0; off < len(raw); off += chunkSize {
+		end := off + chunkSize
+		if end > len(raw) {
+			end = len(raw)
+		}
+		chunks = append(chunks, raw[off:end])
+	}
+
+	path := "/cbucket/stream.bin"
+	host := strings.TrimPrefix(srv.URL, "http://")
+
+	// Seed signature: sign the request with the streaming content-sha256.
+	signed := "content-length;host;x-amz-content-sha256;x-amz-date;x-amz-decoded-content-length"
+	// compute encoded length
+	encodedLen := 0
+	for _, c := range chunks {
+		encodedLen += len(fmt.Sprintf("%x", len(c))) + len(";chunk-signature=") + 64 + 2 + len(c) + 2
+	}
+	encodedLen += 1 + len(";chunk-signature=") + 64 + 2 + 2 // final 0-chunk
+
+	canonHeaders := "content-length:" + fmt.Sprint(encodedLen) + "\n" +
+		"host:" + host + "\n" +
+		"x-amz-content-sha256:" + auth.StreamingPayload + "\n" +
+		"x-amz-date:" + amzDate + "\n" +
+		"x-amz-decoded-content-length:" + fmt.Sprint(len(raw)) + "\n"
+	canonReq := "PUT\n" + auth.EncodePath(path) + "\n\n" + canonHeaders + "\n" + signed + "\n" + auth.StreamingPayload
+	sts := "AWS4-HMAC-SHA256\n" + amzDate + "\n" + scope + "\n" + sha256Hex([]byte(canonReq))
+	seedSig := hex.EncodeToString(hmacSHA256(signingKey, sts))
+
+	// Encode body with per-chunk signatures chained from the seed.
+	var body bytes.Buffer
+	prev := seedSig
+	chunkSTS := func(data []byte) string {
+		return "AWS4-HMAC-SHA256-PAYLOAD\n" + amzDate + "\n" + scope + "\n" + prev + "\n" +
+			emptySHA256 + "\n" + sha256Hex(data)
+	}
+	for _, c := range chunks {
+		sig := hex.EncodeToString(hmacSHA256(signingKey, chunkSTS(c)))
+		prev = sig
+		fmt.Fprintf(&body, "%x;chunk-signature=%s\r\n", len(c), sig)
+		body.Write(c)
+		body.WriteString("\r\n")
+	}
+	finalSig := hex.EncodeToString(hmacSHA256(signingKey, chunkSTS([]byte{})))
+	fmt.Fprintf(&body, "0;chunk-signature=%s\r\n\r\n", finalSig)
+
+	if body.Len() != encodedLen {
+		t.Fatalf("encoded length mismatch: computed %d actual %d", encodedLen, body.Len())
+	}
+
+	req, _ := http.NewRequest(http.MethodPut, srv.URL+path, bytes.NewReader(body.Bytes()))
+	req.ContentLength = int64(encodedLen)
+	req.Header.Set("X-Amz-Date", amzDate)
+	req.Header.Set("X-Amz-Content-Sha256", auth.StreamingPayload)
+	req.Header.Set("X-Amz-Decoded-Content-Length", fmt.Sprint(len(raw)))
+	req.Header.Set("Content-Encoding", "aws-chunked")
+	req.Header.Set("Authorization",
+		"AWS4-HMAC-SHA256 Credential="+testAK+"/"+scope+", SignedHeaders="+signed+", Signature="+seedSig)
+
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("chunked PutObject: %d %s", resp.StatusCode, readBody(t, resp))
+	}
+	if got := strings.Trim(resp.Header.Get("ETag"), `"`); got != md5hex(raw) {
+		t.Fatalf("chunked ETag mismatch: %s vs %s", got, md5hex(raw))
+	}
+	resp.Body.Close()
+
+	// Read it back and compare.
+	resp = do(t, srv, http.MethodGet, path, nil, nil)
+	got := readBody(t, resp)
+	if got != string(raw) {
+		t.Fatalf("chunked round-trip mismatch: len %d vs %d", len(got), len(raw))
+	}
+}

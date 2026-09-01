@@ -1,0 +1,15 @@
+//go:build unix
+
+package fs
+
+import "syscall"
+
+// diskUsage returns total and free bytes for the filesystem holding path.
+func diskUsage(path string) (total, free uint64) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(path, &st); err != nil {
+		return 0, 0
+	}
+	bs := uint64(st.Bsize)
+	return st.Blocks * bs, st.Bavail * bs
+}

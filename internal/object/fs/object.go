@@ -1,0 +1,361 @@
+package fs
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/lojadopocket/gostore/internal/object"
+)
+
+func (f *FS) ensureBucket(bucket string) error {
+	if !validBucketName(bucket) {
+		return object.ErrBucketNameInvalid
+	}
+	st, err := os.Stat(f.bucketDir(bucket))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return object.BucketNotFound{Bucket: bucket}
+		}
+		return err
+	}
+	if !st.IsDir() {
+		return object.BucketNotFound{Bucket: bucket}
+	}
+	return nil
+}
+
+// PutObject stores a full object in one request.
+func (f *FS) PutObject(_ context.Context, bucket, obj string, data *object.PutObjReader, opts object.ObjectOptions) (object.ObjectInfo, error) {
+	if err := f.ensureBucket(bucket); err != nil {
+		return object.ObjectInfo{}, err
+	}
+	if !validObjectName(obj) {
+		return object.ObjectInfo{}, object.ErrObjectNameInvalid
+	}
+
+	lk := f.NewNSLock(bucket, obj)
+	ctx2, _ := lk.GetLock(context.Background(), 0)
+	defer lk.Unlock(ctx2)
+
+	if opts.CheckPrecondFn != nil {
+		cur, _ := f.getInfoUnlocked(bucket, obj)
+		if opts.CheckPrecondFn(cur) {
+			return object.ObjectInfo{}, object.ErrPreconditionFailed
+		}
+	}
+
+	dataPath := f.objDataPath(bucket, obj)
+	if err := f.checkPathConflicts(bucket, obj); err != nil {
+		return object.ObjectInfo{}, err
+	}
+
+	tmp, n, md5hex, err := f.copyToTmpAndHash(data, data.Size())
+	if err != nil {
+		return object.ObjectInfo{}, err
+	}
+	defer os.Remove(tmp)
+
+	if err := os.MkdirAll(filepath.Dir(dataPath), 0o755); err != nil {
+		return object.ObjectInfo{}, err
+	}
+	if err := os.Rename(tmp, dataPath); err != nil {
+		return object.ObjectInfo{}, err
+	}
+
+	now := time.Now().UTC()
+	if !opts.MTime.IsZero() {
+		now = opts.MTime.UTC()
+	}
+	m := objMeta{
+		Size: n, ModTime: now, ETag: md5hex,
+		ContentType: opts.UserDefined["content-type"],
+		ContentEnc:  opts.UserDefined["content-encoding"],
+		UserMeta:    stripReserved(opts.UserDefined),
+		UserTags:    opts.UserTags,
+	}
+	if err := writeMetaFile(f.objMetaPath(bucket, obj), m); err != nil {
+		return object.ObjectInfo{}, err
+	}
+	return m.toObjectInfo(bucket, obj), nil
+}
+
+// checkPathConflicts rejects a key when an ancestor path element is an
+// existing file, or the key itself is an existing directory.
+func (f *FS) checkPathConflicts(bucket, obj string) error {
+	if st, err := os.Stat(f.objDataPath(bucket, obj)); err == nil && st.IsDir() {
+		return object.ErrObjectExistsAsDir
+	}
+	parts := strings.Split(obj, "/")
+	cur := f.bucketDir(bucket)
+	for _, p := range parts[:len(parts)-1] {
+		cur = filepath.Join(cur, p)
+		if st, err := os.Stat(cur); err == nil && !st.IsDir() {
+			return object.ErrObjectExistsAsDir
+		}
+	}
+	return nil
+}
+
+func stripReserved(md map[string]string) map[string]string {
+	if md == nil {
+		return nil
+	}
+	out := map[string]string{}
+	for k, v := range md {
+		lk := strings.ToLower(k)
+		switch lk {
+		case "content-type", "content-encoding", "etag":
+			continue
+		}
+		if strings.HasPrefix(lk, "x-amz-") && !strings.HasPrefix(lk, "x-amz-meta-") {
+			continue
+		}
+		out[strings.TrimPrefix(lk, "x-amz-meta-")] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func (f *FS) getInfoUnlocked(bucket, obj string) (object.ObjectInfo, error) {
+	dataPath := f.objDataPath(bucket, obj)
+	st, err := os.Stat(dataPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return object.ObjectInfo{}, object.ObjectNotFound{Bucket: bucket, Object: obj}
+		}
+		return object.ObjectInfo{}, err
+	}
+	if st.IsDir() {
+		return object.ObjectInfo{}, object.ObjectNotFound{Bucket: bucket, Object: obj}
+	}
+	m, err := readMetaFile(f.objMetaPath(bucket, obj))
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return object.ObjectInfo{}, err
+		}
+		// Externally-placed file: synthesize metadata (real md5).
+		md5hex, herr := md5File(dataPath)
+		if herr != nil {
+			return object.ObjectInfo{}, herr
+		}
+		m = objMeta{Size: st.Size(), ModTime: st.ModTime().UTC(), ETag: md5hex}
+	}
+	return m.toObjectInfo(bucket, obj), nil
+}
+
+func (f *FS) GetObjectInfo(_ context.Context, bucket, obj string, _ object.ObjectOptions) (object.ObjectInfo, error) {
+	if err := f.ensureBucket(bucket); err != nil {
+		return object.ObjectInfo{}, err
+	}
+	lk := f.NewNSLock(bucket, obj)
+	ctx2, _ := lk.GetRLock(context.Background(), 0)
+	defer lk.RUnlock(ctx2)
+	return f.getInfoUnlocked(bucket, obj)
+}
+
+func (f *FS) GetObjectNInfo(_ context.Context, bucket, obj string, rs *object.HTTPRangeSpec, _ http.Header, opts object.ObjectOptions) (*object.GetObjectReader, error) {
+	if err := f.ensureBucket(bucket); err != nil {
+		return nil, err
+	}
+	lk := f.NewNSLock(bucket, obj)
+	ctx2, _ := lk.GetRLock(context.Background(), 0)
+
+	oi, err := f.getInfoUnlocked(bucket, obj)
+	if err != nil {
+		lk.RUnlock(ctx2)
+		return nil, err
+	}
+	if opts.CheckPrecondFn != nil && opts.CheckPrecondFn(oi) {
+		lk.RUnlock(ctx2)
+		return nil, object.ErrPreconditionFailed
+	}
+
+	fh, err := os.Open(f.objDataPath(bucket, obj))
+	if err != nil {
+		lk.RUnlock(ctx2)
+		return nil, err
+	}
+
+	var start, length int64 = 0, oi.Size
+	if rs != nil {
+		start, length, err = resolveRange(rs, oi.Size)
+		if err != nil {
+			_ = fh.Close()
+			lk.RUnlock(ctx2)
+			return nil, err
+		}
+		if _, err := fh.Seek(start, io.SeekStart); err != nil {
+			_ = fh.Close()
+			lk.RUnlock(ctx2)
+			return nil, err
+		}
+		oi.Size = length
+	}
+
+	rc := &fileReader{
+		f:       fh,
+		remain:  length,
+		onClose: func() { lk.RUnlock(ctx2) },
+	}
+	return &object.GetObjectReader{ObjInfo: oi, ReadCloser: rc}, nil
+}
+
+// resolveRange turns an HTTPRangeSpec into (start, length), validating it
+// against the object size.
+func resolveRange(rs *object.HTTPRangeSpec, size int64) (start, length int64, err error) {
+	if rs.IsSuffixLength {
+		n := -rs.Start
+		if n <= 0 {
+			return 0, 0, object.ErrInvalidRange
+		}
+		if n > size {
+			n = size
+		}
+		return size - n, n, nil
+	}
+	if rs.Start < 0 || rs.Start >= size {
+		return 0, 0, object.ErrInvalidRange
+	}
+	end := rs.End
+	if end < 0 || end >= size {
+		end = size - 1
+	}
+	if end < rs.Start {
+		return 0, 0, object.ErrInvalidRange
+	}
+	return rs.Start, end - rs.Start + 1, nil
+}
+
+type fileReader struct {
+	f       *os.File
+	remain  int64
+	onClose func()
+}
+
+func (r *fileReader) Read(p []byte) (int, error) {
+	if r.remain <= 0 {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > r.remain {
+		p = p[:r.remain]
+	}
+	n, err := r.f.Read(p)
+	r.remain -= int64(n)
+	return n, err
+}
+
+func (r *fileReader) Close() error {
+	err := r.f.Close()
+	if r.onClose != nil {
+		r.onClose()
+	}
+	return err
+}
+
+func (f *FS) DeleteObject(_ context.Context, bucket, obj string, _ object.ObjectOptions) (object.ObjectInfo, error) {
+	if err := f.ensureBucket(bucket); err != nil {
+		return object.ObjectInfo{}, err
+	}
+	lk := f.NewNSLock(bucket, obj)
+	ctx2, _ := lk.GetLock(context.Background(), 0)
+	defer lk.Unlock(ctx2)
+
+	dataPath := f.objDataPath(bucket, obj)
+	_ = os.Remove(dataPath)
+	_ = os.Remove(f.objMetaPath(bucket, obj))
+	f.pruneEmptyDirs(filepath.Dir(dataPath), f.bucketDir(bucket))
+	f.pruneEmptyDirs(filepath.Dir(f.objMetaPath(bucket, obj)), f.metaBucketDir(bucket))
+	return object.ObjectInfo{Bucket: bucket, Name: obj}, nil
+}
+
+func (f *FS) DeleteObjects(ctx context.Context, bucket string, objs []object.ObjectToDelete, opts object.ObjectOptions) ([]object.DeletedObject, []error) {
+	deleted := make([]object.DeletedObject, len(objs))
+	errs := make([]error, len(objs))
+	for i, o := range objs {
+		_, err := f.DeleteObject(ctx, bucket, o.ObjectName, opts)
+		if err != nil {
+			errs[i] = err
+			continue
+		}
+		deleted[i] = object.DeletedObject{ObjectName: o.ObjectName}
+	}
+	return deleted, errs
+}
+
+// pruneEmptyDirs removes empty directories from leaf up to (not including) stop.
+func (f *FS) pruneEmptyDirs(leaf, stop string) {
+	for leaf != stop && len(leaf) > len(stop) {
+		if err := os.Remove(leaf); err != nil {
+			return // non-empty or gone
+		}
+		leaf = filepath.Dir(leaf)
+	}
+}
+
+func (f *FS) CopyObject(ctx context.Context, srcBucket, srcObject, dstBucket, dstObject string, srcInfo object.ObjectInfo, srcOpts, dstOpts object.ObjectOptions) (object.ObjectInfo, error) {
+	if err := f.ensureBucket(srcBucket); err != nil {
+		return object.ObjectInfo{}, err
+	}
+	if err := f.ensureBucket(dstBucket); err != nil {
+		return object.ObjectInfo{}, err
+	}
+	src, err := f.getInfoUnlocked(srcBucket, srcObject)
+	if err != nil {
+		return object.ObjectInfo{}, err
+	}
+
+	sameObject := srcBucket == dstBucket && srcObject == dstObject
+	replace := strings.EqualFold(dstOpts.UserDefined["x-amz-metadata-directive"], "REPLACE") ||
+		dstOpts.UserDefined["_directive"] == "REPLACE"
+
+	if sameObject && !replace {
+		// No-op copy onto itself with COPY directive: just refresh mtime.
+		return src, nil
+	}
+
+	if sameObject && replace {
+		m, err := readMetaFile(f.objMetaPath(srcBucket, srcObject))
+		if err != nil {
+			return object.ObjectInfo{}, err
+		}
+		m.ModTime = time.Now().UTC()
+		m.ContentType = dstOpts.UserDefined["content-type"]
+		m.ContentEnc = dstOpts.UserDefined["content-encoding"]
+		m.UserMeta = stripReserved(dstOpts.UserDefined)
+		if dstOpts.UserTags != "" {
+			m.UserTags = dstOpts.UserTags
+		}
+		if err := writeMetaFile(f.objMetaPath(srcBucket, srcObject), m); err != nil {
+			return object.ObjectInfo{}, err
+		}
+		return m.toObjectInfo(dstBucket, dstObject), nil
+	}
+
+	// Cross-object copy: stream data through PutObject.
+	rc, err := os.Open(f.objDataPath(srcBucket, srcObject))
+	if err != nil {
+		return object.ObjectInfo{}, err
+	}
+	defer rc.Close()
+
+	ud := map[string]string{}
+	if replace {
+		for k, v := range dstOpts.UserDefined {
+			ud[k] = v
+		}
+	} else {
+		for k, v := range src.UserDefined {
+			ud[k] = v
+		}
+	}
+	pr := object.NewPutObjReader(rc, src.Size, src.Size)
+	return f.PutObject(ctx, dstBucket, dstObject, pr, object.ObjectOptions{UserDefined: ud, UserTags: dstOpts.UserTags})
+}

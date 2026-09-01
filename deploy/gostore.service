@@ -1,0 +1,33 @@
+# systemd unit for a bare-metal gostore deployment.
+#
+#   sudo useradd --system --home /var/lib/gostore --shell /usr/sbin/nologin gostore
+#   sudo mkdir -p /var/lib/gostore/data && sudo chown -R gostore:gostore /var/lib/gostore
+#   sudo cp dist/gostore-linux-amd64 /usr/local/bin/gostore
+#   sudo cp deploy/gostore.service /etc/systemd/system/
+#   sudo cp deploy/gostore.env /etc/gostore.env   # edit credentials!
+#   sudo systemctl daemon-reload && sudo systemctl enable --now gostore
+
+[Unit]
+Description=gostore S3-compatible object storage
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gostore
+Group=gostore
+EnvironmentFile=/etc/gostore.env
+ExecStart=/usr/local/bin/gostore server --address :9000 --console-address :9001 /var/lib/gostore/data
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65536
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/gostore
+
+[Install]
+WantedBy=multi-user.target

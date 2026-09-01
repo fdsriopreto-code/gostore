@@ -1,0 +1,35 @@
+# gostore single-node deployment.
+#
+#   docker compose up -d --build
+#   S3 API   -> http://<host>:9000
+#   Console  -> http://<host>:9001
+#
+# Point any S3 client at :9000 with the credentials below (path-style).
+
+services:
+  gostore:
+    build:
+      context: .
+      args:
+        VERSION: "0.3.0-m3"
+    image: gostore:local
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      GOSTORE_ROOT_USER: "gostoreadmin"
+      GOSTORE_ROOT_PASSWORD: "change-me-please-32chars-minimum"
+      GOSTORE_REGION: "us-east-1"
+      GOSTORE_LOG_LEVEL: "info"
+      # GOSTORE_DOMAIN: "s3.example.com"   # enable virtual-host-style addressing
+    volumes:
+      - gostore-data:/data
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/gostore", "version"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  gostore-data:
