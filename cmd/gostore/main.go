@@ -238,8 +238,8 @@ func parseEllipsis(s string) (lo, hi int, ok bool) {
 	return lo, hi, true
 }
 
-// consolePlaceholder is the M0 web console: a single status page. M14 builds
-// the real UI.
+// consolePlaceholder is the interim web console: a single status page. The
+// real UI is milestone M14.
 func consolePlaceholder(cfg config.Config) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
@@ -248,13 +248,26 @@ func consolePlaceholder(cfg config.Config) http.Handler {
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprintf(w, `<!doctype html><meta charset=utf-8><title>gostore console</title>
-<body style="font:14px system-ui;margin:3rem;max-width:40rem">
-<h1>gostore console</h1>
-<p>Milestone 0 &mdash; scaffold. The web console lands in M14.</p>
-<ul>
-<li>S3 API: <code>%s</code></li>
-<li>Region: <code>%s</code></li>
-<li>Mode: <code>%s</code></li>
-</ul>`, cfg.Address, cfg.Region, modeString(cfg))
+<body style="font:14px/1.5 system-ui;margin:3rem;max-width:44rem;color:#1a1a1a">
+<h1 style="margin-bottom:.2rem">gostore</h1>
+<p style="color:#666;margin-top:0">S3-compatible object storage &mdash; version %s</p>
+<table style="border-collapse:collapse">
+<tr><td style="padding:.2rem 1rem .2rem 0;color:#666">S3 API</td><td><code>%s</code></td></tr>
+<tr><td style="padding:.2rem 1rem .2rem 0;color:#666">Region</td><td><code>%s</code></td></tr>
+<tr><td style="padding:.2rem 1rem .2rem 0;color:#666">Mode</td><td><code>%s</code></td></tr>
+<tr><td style="padding:.2rem 1rem .2rem 0;color:#666">Health</td><td><a href="//%s/gostore/health/ready">/gostore/health/ready</a></td></tr>
+</table>
+<p style="margin-top:1.5rem">This is a status page. The S3 API on <code>%s</code> requires AWS
+Signature V4 &mdash; use <code>mc</code>, the AWS CLI/SDKs, or any S3 client
+(path-style). A full web console is planned for milestone M14.</p>
+</body>`, version, cfg.Address, cfg.Region, modeString(cfg), stripColon(cfg.ConsoleAddress), cfg.Address)
 	})
+}
+
+// stripColon turns ":9001" into "localhost:9001" for a usable link host.
+func stripColon(addr string) string {
+	if strings.HasPrefix(addr, ":") {
+		return "localhost" + addr
+	}
+	return addr
 }
