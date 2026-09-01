@@ -84,11 +84,23 @@ func (p *Pool) doList(ctx context.Context, bucket string, lp listParams) (listPa
 	if lp.maxKeys <= 0 || lp.maxKeys > 1000 {
 		lp.maxKeys = 1000
 	}
-	set := p.sets[0]
-	keys, err := set.walkKeys(ctx, bucket)
-	if err != nil {
-		return listPage{}, err
+
+	// Objects are spread across sets by key hash — gather from every set.
+	owner := map[string]*Set{}
+	for _, set := range p.sets {
+		ks, err := set.walkKeys(ctx, bucket)
+		if err != nil {
+			return listPage{}, err
+		}
+		for _, k := range ks {
+			owner[k] = set
+		}
 	}
+	keys := make([]string, 0, len(owner))
+	for k := range owner {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
 
 	var page listPage
 	seen := map[string]bool{}
@@ -122,7 +134,7 @@ func (p *Pool) doList(ctx context.Context, bucket string, lp listParams) (listPa
 			page.isTruncated = true
 			return page, nil
 		}
-		m, err := set.statObject(ctx, bucket, k)
+		m, err := owner[k].statObject(ctx, bucket, k)
 		if err != nil {
 			continue
 		}

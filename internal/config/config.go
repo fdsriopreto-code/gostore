@@ -5,6 +5,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 )
@@ -15,9 +16,14 @@ type Config struct {
 	Address string
 	// ConsoleAddress is the listen address for the web console, e.g. ":9001".
 	ConsoleAddress string
-	// Volumes are the disk paths (or expanded ellipsis specs) backing storage.
-	// A single path => single-disk mode. Multiple => erasure mode (M4+).
+	// Volumes is the flat list of every disk path (all groups concatenated),
+	// used for logging and single-disk detection.
 	Volumes []string
+
+	// VolumeGroups is the disk paths grouped by CLI argument. Each group with
+	// more than one disk becomes one erasure set; all groups together form a
+	// single pool (M5). One group of one disk => single-disk mode.
+	VolumeGroups [][]string
 
 	// Region reported by the S3 API (LocationConstraint).
 	Region string
@@ -77,18 +83,24 @@ func (c Config) Validate() error {
 	if c.Address == "" {
 		return errors.New("config: empty API address")
 	}
-	if len(c.Volumes) == 0 {
+	if len(c.VolumeGroups) == 0 {
 		return errors.New("config: no storage volumes given (usage: gostore server [flags] DIR...)")
 	}
 	if len(c.RootUser) < 3 || len(c.RootPassword) < 8 {
 		return errors.New("config: root user must be >=3 chars and root password >=8 chars")
 	}
-	// Erasure mode needs an even count >=4 (M4 will refine: 4/6/8/10/12/14/16).
-	if len(c.Volumes) > 1 && (len(c.Volumes)%2 != 0 || len(c.Volumes) < 4) {
-		return errors.New("config: erasure mode requires an even number of volumes, minimum 4")
+	if c.SingleDisk() {
+		return nil
+	}
+	for i, g := range c.VolumeGroups {
+		if len(g) < 4 || len(g)%2 != 0 {
+			return fmt.Errorf("config: erasure set %d has %d disks; each set needs an even count >= 4", i+1, len(g))
+		}
 	}
 	return nil
 }
 
 // SingleDisk reports whether the server runs in single-disk mode.
-func (c Config) SingleDisk() bool { return len(c.Volumes) == 1 }
+func (c Config) SingleDisk() bool {
+	return len(c.VolumeGroups) == 1 && len(c.VolumeGroups[0]) == 1
+}

@@ -109,11 +109,14 @@ func runServer(args []string) error {
 		cfg.LogJSON = true
 	}
 
-	vols, err := expandVolumes(fs.Args())
+	groups, err := expandVolumeGroups(fs.Args())
 	if err != nil {
 		return err
 	}
-	cfg.Volumes = vols
+	cfg.VolumeGroups = groups
+	for _, g := range groups {
+		cfg.Volumes = append(cfg.Volumes, g...)
+	}
 
 	if err := cfg.Validate(); err != nil {
 		return err
@@ -130,29 +133,37 @@ func runServer(args []string) error {
 
 	var obj object.Layer
 	if cfg.SingleDisk() {
-		backend, err := fsbackend.New(cfg.Volumes[0])
+		backend, err := fsbackend.New(cfg.VolumeGroups[0][0])
 		if err != nil {
-			return fmt.Errorf("open volume %s: %w", cfg.Volumes[0], err)
+			return fmt.Errorf("open volume %s: %w", cfg.VolumeGroups[0][0], err)
 		}
 		obj = backend
 	} else {
-		disks := make([]erasure.Disk, len(cfg.Volumes))
-		for i, v := range cfg.Volumes {
-			d, err := storage.OpenLocalDisk(v, 0, i)
-			if err != nil {
-				return fmt.Errorf("open disk %s: %w", v, err)
+		sets := make([]*erasure.Set, len(cfg.VolumeGroups))
+		for si, group := range cfg.VolumeGroups {
+			disks := make([]erasure.Disk, len(group))
+			for di, v := range group {
+				d, err := storage.OpenLocalDisk(v, si, di)
+				if err != nil {
+					return fmt.Errorf("open disk %s: %w", v, err)
+				}
+				disks[di] = d
 			}
-			disks[i] = d
+			set, err := erasure.NewSet(disks)
+			if err != nil {
+				return fmt.Errorf("init erasure set %d: %w", si+1, err)
+			}
+			sets[si] = set
 		}
-		pool, err := erasure.FromDisks(disks)
+		pool, err := erasure.NewPool(sets...)
 		if err != nil {
-			return fmt.Errorf("init erasure backend: %w", err)
+			return fmt.Errorf("init erasure pool: %w", err)
 		}
 		obj = pool
+		n := len(cfg.VolumeGroups[0])
 		logger.Info("erasure backend ready",
-			"disks", len(disks),
-			"dataBlocks", len(disks)-len(disks)/2,
-			"parityBlocks", len(disks)/2)
+			"sets", len(sets), "disksPerSet", n,
+			"dataBlocks", n-n/2, "parityBlocks", n/2)
 	}
 
 	creds := auth.NewRoot(cfg.RootUser, cfg.RootPassword)
@@ -211,22 +222,25 @@ func modeString(c config.Config) string {
 	if c.SingleDisk() {
 		return "single-disk"
 	}
-	return fmt.Sprintf("erasure (%d volumes)", len(c.Volumes))
+	if len(c.VolumeGroups) == 1 {
+		return fmt.Sprintf("erasure (1 set, %d disks)", len(c.VolumeGroups[0]))
+	}
+	return fmt.Sprintf("erasure pool (%d sets)", len(c.VolumeGroups))
 }
 
-// expandVolumes expands MinIO-style ellipsis specs. Currently supports a
-// single numeric range per path, e.g. "./data/disk{1...4}" ->
-// ["./data/disk1", ... "./data/disk4"]. Multiple/nested ranges: M4.
-func expandVolumes(args []string) ([]string, error) {
+// expandVolumeGroups turns each CLI argument into a group of disk paths,
+// expanding a MinIO-style ellipsis spec ("./data/disk{1...4}"). Each group
+// becomes one erasure set; all groups form one pool.
+func expandVolumeGroups(args []string) ([][]string, error) {
 	if len(args) == 0 {
 		return nil, errors.New("no volumes given")
 	}
-	var out []string
+	var groups [][]string
 	for _, a := range args {
 		openIdx := strings.IndexByte(a, '{')
 		closeIdx := strings.IndexByte(a, '}')
 		if openIdx < 0 || closeIdx < 0 || closeIdx < openIdx {
-			out = append(out, a)
+			groups = append(groups, []string{a})
 			continue
 		}
 		inner := a[openIdx+1 : closeIdx]
@@ -235,11 +249,13 @@ func expandVolumes(args []string) ([]string, error) {
 			return nil, fmt.Errorf("invalid ellipsis spec %q (want {N...M})", a)
 		}
 		prefix, suffix := a[:openIdx], a[closeIdx+1:]
+		var g []string
 		for i := lo; i <= hi; i++ {
-			out = append(out, fmt.Sprintf("%s%d%s", prefix, i, suffix))
+			g = append(g, fmt.Sprintf("%s%d%s", prefix, i, suffix))
 		}
+		groups = append(groups, g)
 	}
-	return out, nil
+	return groups, nil
 }
 
 func parseEllipsis(s string) (lo, hi int, ok bool) {

@@ -288,6 +288,108 @@ func TestDeleteBucketAfterEmptying(t *testing.T) {
 	}
 }
 
+// newTestPoolSets builds a pool of `nsets` erasure sets, each with
+// `perSet` disks.
+func newTestPoolSets(t *testing.T, nsets, perSet int) *Pool {
+	t.Helper()
+	base := t.TempDir()
+	sets := make([]*Set, nsets)
+	for si := 0; si < nsets; si++ {
+		disks := make([]Disk, perSet)
+		for di := 0; di < perSet; di++ {
+			root := filepath.Join(base, fmt.Sprintf("s%d-d%d", si, di))
+			d, err := storage.OpenLocalDisk(root, si, di)
+			if err != nil {
+				t.Fatal(err)
+			}
+			disks[di] = d
+		}
+		set, err := NewSet(disks)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sets[si] = set
+	}
+	p, err := NewPool(sets...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestServerPoolsSpreadAndList(t *testing.T) {
+	p := newTestPoolSets(t, 3, 4) // 3 sets of 4 disks
+	if err := p.MakeBucket(ctx(), "buck", object.MakeBucketOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{}
+	for i := 0; i < 60; i++ {
+		k := fmt.Sprintf("k/%03d", i)
+		body := fmt.Sprintf("value-%d-%d", i, i*7)
+		put(t, p, "buck", k, []byte(body))
+		want[k] = body
+	}
+	// Every key must be readable and correct regardless of which set holds it.
+	for k, v := range want {
+		if got := string(get(t, p, "buck", k)); got != v {
+			t.Fatalf("%s: got %q want %q", k, got, v)
+		}
+	}
+	// Listing must merge across all sets.
+	seen := map[string]bool{}
+	token := ""
+	for {
+		li, err := p.ListObjectsV2(ctx(), "buck", "k/", token, "", 17, false, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, o := range li.Objects {
+			if seen[o.Name] {
+				t.Fatalf("dup %s", o.Name)
+			}
+			seen[o.Name] = true
+		}
+		if !li.IsTruncated {
+			break
+		}
+		token = li.NextContinuationToken
+	}
+	if len(seen) != len(want) {
+		t.Fatalf("listed %d keys, want %d", len(seen), len(want))
+	}
+}
+
+func TestServerPoolsMultipart(t *testing.T) {
+	p := newTestPoolSets(t, 2, 4)
+	_ = p.MakeBucket(ctx(), "buck", object.MakeBucketOptions{})
+	res, err := p.NewMultipartUpload(ctx(), "buck", "spread/big", object.ObjectOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p1 := make([]byte, 5*1024*1024+7)
+	p2 := []byte("tail-bytes")
+	_, _ = rand.Read(p1)
+	i1, err := p.PutObjectPart(ctx(), "buck", "spread/big", res.UploadID, 1,
+		object.NewPutObjReader(bytes.NewReader(p1), int64(len(p1)), int64(len(p1))), object.ObjectOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	i2, err := p.PutObjectPart(ctx(), "buck", "spread/big", res.UploadID, 2,
+		object.NewPutObjReader(bytes.NewReader(p2), int64(len(p2)), int64(len(p2))), object.ObjectOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.CompleteMultipartUpload(ctx(), "buck", "spread/big", res.UploadID, []object.CompletePart{
+		{PartNumber: 1, ETag: i1.ETag}, {PartNumber: 2, ETag: i2.ETag},
+	}, object.ObjectOptions{}); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	got := get(t, p, "buck", "spread/big")
+	if !bytes.Equal(got, append(append([]byte{}, p1...), p2...)) {
+		t.Fatal("assembled mismatch")
+	}
+}
+
 func TestBucketOps(t *testing.T) {
 	p, _ := newTestPool(t, 4)
 	if err := p.MakeBucket(ctx(), "one", object.MakeBucketOptions{}); err != nil {

@@ -55,29 +55,33 @@ func (p *Pool) NewMultipartUpload(ctx context.Context, bucket, key string, opts 
 	return &object.NewMultipartUploadResult{UploadID: id}, nil
 }
 
-func (p *Pool) loadUpload(ctx context.Context, key, id string) (uploadInfo, error) {
-	set := p.setFor(key)
-	for _, d := range set.disks {
-		b, err := d.ReadAll(ctx, "", mpUploadJSON(id))
-		if err != nil {
-			continue
-		}
-		var ui uploadInfo
-		if err := json.Unmarshal(b, &ui); err == nil {
-			return ui, nil
+// loadUpload finds an upload's metadata by scanning every set (the upload id
+// alone does not tell us which set holds it).
+func (p *Pool) loadUpload(ctx context.Context, id string) (uploadInfo, *Set, error) {
+	for _, set := range p.sets {
+		for _, d := range set.disks {
+			b, err := d.ReadAll(ctx, "", mpUploadJSON(id))
+			if err != nil {
+				continue
+			}
+			var ui uploadInfo
+			if err := json.Unmarshal(b, &ui); err == nil {
+				return ui, set, nil
+			}
 		}
 	}
-	return uploadInfo{}, object.ErrInvalidUploadID
+	return uploadInfo{}, nil, object.ErrInvalidUploadID
 }
 
 func (p *Pool) PutObjectPart(ctx context.Context, bucket, key, uploadID string, partID int, data *object.PutObjReader, _ object.ObjectOptions) (object.PartInfo, error) {
-	if _, err := p.loadUpload(ctx, key, uploadID); err != nil {
+	_, set, err := p.loadUpload(ctx, uploadID)
+	if err != nil {
 		return object.PartInfo{}, err
 	}
 	if partID < 1 || partID > 10000 {
 		return object.PartInfo{}, object.ErrInvalidPart
 	}
-	meta, err := p.setFor(key).putObject(ctx, "", mpPartKey(uploadID, partID), []partSource{
+	meta, err := set.putObject(ctx, "", mpPartKey(uploadID, partID), []partSource{
 		{Number: 1, Size: data.Size(), Reader: data},
 	}, userMeta{})
 	if err != nil {
@@ -111,8 +115,7 @@ func rangeEnd(start, length int64) int64 {
 	return start + length - 1
 }
 
-func (p *Pool) listUploadedParts(ctx context.Context, key, uploadID string) ([]object.PartInfo, error) {
-	set := p.setFor(key)
+func (p *Pool) listUploadedParts(ctx context.Context, set *Set, uploadID string) ([]object.PartInfo, error) {
 	var disk Disk
 	for _, d := range set.disks {
 		if d.IsOnline() {
@@ -150,11 +153,11 @@ func (p *Pool) listUploadedParts(ctx context.Context, key, uploadID string) ([]o
 }
 
 func (p *Pool) ListObjectParts(ctx context.Context, bucket, key, uploadID string, partNumberMarker, maxParts int, _ object.ObjectOptions) (object.ListPartsInfo, error) {
-	ui, err := p.loadUpload(ctx, key, uploadID)
+	ui, set, err := p.loadUpload(ctx, uploadID)
 	if err != nil {
 		return object.ListPartsInfo{}, err
 	}
-	all, err := p.listUploadedParts(ctx, key, uploadID)
+	all, err := p.listUploadedParts(ctx, set, uploadID)
 	if err != nil {
 		return object.ListPartsInfo{}, err
 	}
@@ -184,41 +187,47 @@ func (p *Pool) ListMultipartUploads(ctx context.Context, bucket, prefix, keyMark
 	if err := p.ensureBucket(ctx, bucket); err != nil {
 		return object.ListMultipartsInfo{}, err
 	}
-	set := p.sets[0]
-	var disk Disk
-	for _, d := range set.disks {
-		if d.IsOnline() {
-			disk = d
-			break
-		}
-	}
-	if disk == nil {
-		return object.ListMultipartsInfo{}, object.ErrReadQuorum
-	}
-	entries, err := disk.ListDir(ctx, "", mpartPrefix)
-	if err != nil {
-		return object.ListMultipartsInfo{}, err
-	}
 	if maxUploads <= 0 || maxUploads > 1000 {
 		maxUploads = 1000
 	}
 	var ups []object.MultipartInfo
-	for _, e := range entries {
-		if !strings.HasSuffix(e, "/") {
+	seen := map[string]bool{}
+	for _, set := range p.sets {
+		var disk Disk
+		for _, d := range set.disks {
+			if d.IsOnline() {
+				disk = d
+				break
+			}
+		}
+		if disk == nil {
 			continue
 		}
-		id := strings.TrimSuffix(e, "/")
-		ui, err := p.loadUpload(ctx, "", id)
-		if err != nil || ui.Bucket != bucket {
+		entries, err := disk.ListDir(ctx, "", mpartPrefix)
+		if err != nil {
 			continue
 		}
-		if prefix != "" && !strings.HasPrefix(ui.Object, prefix) {
-			continue
+		for _, e := range entries {
+			if !strings.HasSuffix(e, "/") {
+				continue
+			}
+			id := strings.TrimSuffix(e, "/")
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			ui, _, err := p.loadUpload(ctx, id)
+			if err != nil || ui.Bucket != bucket {
+				continue
+			}
+			if prefix != "" && !strings.HasPrefix(ui.Object, prefix) {
+				continue
+			}
+			ups = append(ups, object.MultipartInfo{
+				Bucket: bucket, Object: ui.Object, UploadID: id,
+				Initiated: ui.Initiated, UserDefined: ui.UserMeta,
+			})
 		}
-		ups = append(ups, object.MultipartInfo{
-			Bucket: bucket, Object: ui.Object, UploadID: id,
-			Initiated: ui.Initiated, UserDefined: ui.UserMeta,
-		})
 	}
 	sort.Slice(ups, func(i, j int) bool {
 		if ups[i].Object != ups[j].Object {
@@ -238,22 +247,23 @@ func (p *Pool) ListMultipartUploads(ctx context.Context, bucket, prefix, keyMark
 }
 
 func (p *Pool) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID string, _ object.ObjectOptions) error {
-	if _, err := p.loadUpload(ctx, key, uploadID); err != nil {
+	_, set, err := p.loadUpload(ctx, uploadID)
+	if err != nil {
 		return err
 	}
-	_ = p.setFor(key).forEachDisk(func(d Disk) error { return d.Delete(ctx, "", mpUploadDir(uploadID), true) })
+	_ = set.forEachDisk(func(d Disk) error { return d.Delete(ctx, "", mpUploadDir(uploadID), true) })
 	return nil
 }
 
 func (p *Pool) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, uploaded []object.CompletePart, _ object.ObjectOptions) (object.ObjectInfo, error) {
-	ui, err := p.loadUpload(ctx, key, uploadID)
+	ui, set, err := p.loadUpload(ctx, uploadID)
 	if err != nil {
 		return object.ObjectInfo{}, err
 	}
 	if len(uploaded) == 0 {
 		return object.ObjectInfo{}, object.ErrInvalidPart
 	}
-	have, err := p.listUploadedParts(ctx, key, uploadID)
+	have, err := p.listUploadedParts(ctx, set, uploadID)
 	if err != nil {
 		return object.ObjectInfo{}, err
 	}
@@ -266,7 +276,6 @@ func (p *Pool) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadI
 	c, _ := lk.GetLock(ctx, 0)
 	defer lk.Unlock(c)
 
-	set := p.setFor(key)
 	sources := make([]partSource, 0, len(uploaded))
 	readers := make([]*io.PipeReader, 0, len(uploaded))
 	prev := 0
