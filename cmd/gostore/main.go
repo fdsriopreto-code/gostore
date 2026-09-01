@@ -27,9 +27,11 @@ import (
 	"github.com/lojadopocket/gostore/internal/api"
 	"github.com/lojadopocket/gostore/internal/auth"
 	"github.com/lojadopocket/gostore/internal/config"
+	"github.com/lojadopocket/gostore/internal/erasure"
 	"github.com/lojadopocket/gostore/internal/logger"
 	"github.com/lojadopocket/gostore/internal/object"
 	fsbackend "github.com/lojadopocket/gostore/internal/object/fs"
+	"github.com/lojadopocket/gostore/internal/storage"
 )
 
 var version = "0.3.0-m3"
@@ -126,16 +128,32 @@ func runServer(args []string) error {
 		"mode", modeString(cfg),
 	)
 
-	if !cfg.SingleDisk() {
-		return fmt.Errorf("this build (M1–M3) supports single-disk mode only: pass exactly one volume, got %d. "+
-			"Erasure-coded / distributed mode is milestone M4", len(cfg.Volumes))
+	var obj object.Layer
+	if cfg.SingleDisk() {
+		backend, err := fsbackend.New(cfg.Volumes[0])
+		if err != nil {
+			return fmt.Errorf("open volume %s: %w", cfg.Volumes[0], err)
+		}
+		obj = backend
+	} else {
+		disks := make([]erasure.Disk, len(cfg.Volumes))
+		for i, v := range cfg.Volumes {
+			d, err := storage.OpenLocalDisk(v, 0, i)
+			if err != nil {
+				return fmt.Errorf("open disk %s: %w", v, err)
+			}
+			disks[i] = d
+		}
+		pool, err := erasure.FromDisks(disks)
+		if err != nil {
+			return fmt.Errorf("init erasure backend: %w", err)
+		}
+		obj = pool
+		logger.Info("erasure backend ready",
+			"disks", len(disks),
+			"dataBlocks", len(disks)-len(disks)/2,
+			"parityBlocks", len(disks)/2)
 	}
-
-	backend, err := fsbackend.New(cfg.Volumes[0])
-	if err != nil {
-		return fmt.Errorf("open volume %s: %w", cfg.Volumes[0], err)
-	}
-	var obj object.Layer = backend
 
 	creds := auth.NewRoot(cfg.RootUser, cfg.RootPassword)
 	logger.Info("root credential ready", "accessKey", cfg.RootUser)

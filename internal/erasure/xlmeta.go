@@ -1,0 +1,110 @@
+package erasure
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"hash/fnv"
+	"time"
+)
+
+// xlMetaVersion is the on-disk metadata schema version.
+const xlMetaVersion = 1
+
+// XLMeta is the per-object metadata. A byte-identical copy is written to
+// every disk in the set, so a quorum of disks is enough to recover it and
+// equality checks are a simple content comparison.
+type XLMeta struct {
+	Version int         `json:"version"`
+	Erasure ErasureMeta `json:"erasure"`
+
+	Size    int64     `json:"size"`
+	ModTime time.Time `json:"modTime"`
+	ETag    string    `json:"etag"`
+
+	ContentType string            `json:"contentType,omitempty"`
+	ContentEnc  string            `json:"contentEncoding,omitempty"`
+	UserMeta    map[string]string `json:"userMeta,omitempty"`
+	UserTags    string            `json:"userTags,omitempty"`
+
+	Parts []PartMeta `json:"parts"`
+}
+
+// ErasureMeta captures the coding parameters for the object.
+type ErasureMeta struct {
+	Algorithm    string `json:"algorithm"` // "reedsolomon"
+	DataBlocks   int    `json:"data"`
+	ParityBlocks int    `json:"parity"`
+	BlockSize    int64  `json:"blockSize"`
+
+	// Distribution[j] = index (0-based) of the disk holding shard j.
+	// Shards 0..DataBlocks-1 are data shards; the rest are parity.
+	Distribution []int `json:"distribution"`
+
+	ChecksumAlgo string `json:"checksumAlgo"` // BitrotAlgo
+}
+
+// PartMeta describes one part of the object.
+type PartMeta struct {
+	Number     int    `json:"number"`
+	Size       int64  `json:"size"`       // logical (plaintext) size
+	ActualSize int64  `json:"actualSize"` // same as Size in M4 (no compression/SSE)
+	ETag       string `json:"etag"`       // md5 hex of the part plaintext
+
+	// Checksums[stripe][diskIndex] = hex bitrot hash of that disk's shard for
+	// that stripe. Lets a single corrupted shard be excluded before Reed-
+	// Solomon reconstruction, and works for ranged reads.
+	Checksums [][]string `json:"checksums"`
+}
+
+func (m *XLMeta) marshal() ([]byte, error) { return json.Marshal(m) }
+
+func unmarshalXLMeta(b []byte) (*XLMeta, error) {
+	var m XLMeta
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
+// contentHash returns a stable hash of the metadata's identity fields, used
+// to pick the winning version across disks by majority.
+func (m *XLMeta) contentHash() string {
+	h := sha256.New()
+	b, _ := json.Marshal(struct {
+		S int64
+		T int64
+		E string
+		P []PartMeta
+	}{m.Size, m.ModTime.UnixNano(), m.ETag, m.Parts})
+	h.Write(b)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// shardForDisk returns the shard index j (0-based) stored on the given disk
+// index, or -1 if that disk holds no shard for this object.
+func (em ErasureMeta) shardForDisk(diskIdx int) int {
+	for j, d := range em.Distribution {
+		if d == diskIdx {
+			return j
+		}
+	}
+	return -1
+}
+
+// buildDistribution returns a rotated identity permutation of [0,n) seeded by
+// the object key, so shard placement spreads across disks without a lookup
+// table. Reversible via shardForDisk.
+func buildDistribution(key string, n int) []int {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(key))
+	rot := int(h.Sum32()) % n
+	if rot < 0 {
+		rot += n
+	}
+	d := make([]int, n)
+	for j := 0; j < n; j++ {
+		d[j] = (j + rot) % n
+	}
+	return d
+}

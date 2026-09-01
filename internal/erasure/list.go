@@ -1,0 +1,182 @@
+package erasure
+
+import (
+	"context"
+	"encoding/base64"
+	"path"
+	"sort"
+	"strings"
+
+	"github.com/lojadopocket/gostore/internal/object"
+)
+
+// walkKeys returns every object key in the bucket (slash-separated, sorted).
+// An object is any directory that directly contains an xl.meta file. M4 walks
+// the first online disk; cross-disk merge for partial namespaces is M7.
+func (s *Set) walkKeys(ctx context.Context, bucket string) ([]string, error) {
+	var disk Disk
+	for _, d := range s.disks {
+		if d.IsOnline() {
+			disk = d
+			break
+		}
+	}
+	if disk == nil {
+		return nil, ErrReadQuorum
+	}
+
+	var keys []string
+	var rec func(prefix string) error
+	rec = func(prefix string) error {
+		entries, err := disk.ListDir(ctx, bucket, prefix)
+		if err != nil {
+			return err
+		}
+		isObject := false
+		for _, e := range entries {
+			if e == metaFile {
+				isObject = true
+				break
+			}
+		}
+		if isObject {
+			if prefix != "" {
+				keys = append(keys, strings.TrimSuffix(prefix, "/"))
+			}
+			return nil
+		}
+		for _, e := range entries {
+			if !strings.HasSuffix(e, "/") {
+				continue
+			}
+			if prefix == "" && e == ".gostore.sys/" {
+				continue
+			}
+			if err := rec(path.Join(prefix, e) + "/"); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := rec(""); err != nil {
+		return nil, err
+	}
+	sort.Strings(keys)
+	return keys, nil
+}
+
+type listParams struct {
+	prefix, delimiter, startAfter string
+	maxKeys                       int
+}
+
+type listPage struct {
+	objects     []object.ObjectInfo
+	prefixes    []string
+	isTruncated bool
+	nextMarker  string
+}
+
+func (p *Pool) doList(ctx context.Context, bucket string, lp listParams) (listPage, error) {
+	if err := p.ensureBucket(ctx, bucket); err != nil {
+		return listPage{}, err
+	}
+	if lp.maxKeys <= 0 || lp.maxKeys > 1000 {
+		lp.maxKeys = 1000
+	}
+	set := p.sets[0]
+	keys, err := set.walkKeys(ctx, bucket)
+	if err != nil {
+		return listPage{}, err
+	}
+
+	var page listPage
+	seen := map[string]bool{}
+	count := 0
+	for _, k := range keys {
+		if lp.prefix != "" && !strings.HasPrefix(k, lp.prefix) {
+			continue
+		}
+		if lp.startAfter != "" && k <= lp.startAfter {
+			continue
+		}
+		if lp.delimiter != "" {
+			rest := k[len(lp.prefix):]
+			if idx := strings.Index(rest, lp.delimiter); idx >= 0 {
+				cp := lp.prefix + rest[:idx+len(lp.delimiter)]
+				if seen[cp] {
+					continue
+				}
+				if count >= lp.maxKeys {
+					page.isTruncated = true
+					return page, nil
+				}
+				seen[cp] = true
+				page.prefixes = append(page.prefixes, cp)
+				page.nextMarker = cp
+				count++
+				continue
+			}
+		}
+		if count >= lp.maxKeys {
+			page.isTruncated = true
+			return page, nil
+		}
+		m, err := set.statObject(ctx, bucket, k)
+		if err != nil {
+			continue
+		}
+		page.objects = append(page.objects, metaToInfo(bucket, k, m))
+		page.nextMarker = k
+		count++
+	}
+	sort.Strings(page.prefixes)
+	return page, nil
+}
+
+func (p *Pool) ListObjects(ctx context.Context, bucket, prefix, marker, delimiter string, maxKeys int) (object.ListObjectsInfo, error) {
+	pg, err := p.doList(ctx, bucket, listParams{prefix: prefix, delimiter: delimiter, startAfter: marker, maxKeys: maxKeys})
+	if err != nil {
+		return object.ListObjectsInfo{}, err
+	}
+	return object.ListObjectsInfo{
+		IsTruncated: pg.isTruncated, NextMarker: pg.nextMarker,
+		Objects: pg.objects, Prefixes: pg.prefixes,
+	}, nil
+}
+
+func (p *Pool) ListObjectsV2(ctx context.Context, bucket, prefix, token, delimiter string, maxKeys int, _ bool, startAfter string) (object.ListObjectsV2Info, error) {
+	start := startAfter
+	if token != "" {
+		if b, err := base64.StdEncoding.DecodeString(token); err == nil {
+			start = string(b)
+		}
+	}
+	pg, err := p.doList(ctx, bucket, listParams{prefix: prefix, delimiter: delimiter, startAfter: start, maxKeys: maxKeys})
+	if err != nil {
+		return object.ListObjectsV2Info{}, err
+	}
+	out := object.ListObjectsV2Info{
+		IsTruncated: pg.isTruncated, ContinuationToken: token,
+		Objects: pg.objects, Prefixes: pg.prefixes,
+	}
+	if pg.isTruncated {
+		out.NextContinuationToken = base64.StdEncoding.EncodeToString([]byte(pg.nextMarker))
+	}
+	return out, nil
+}
+
+func (p *Pool) ListObjectVersions(ctx context.Context, bucket, prefix, marker, versionMarker, delimiter string, maxKeys int) (object.ListObjectVersionsInfo, error) {
+	li, err := p.ListObjects(ctx, bucket, prefix, marker, delimiter, maxKeys)
+	if err != nil {
+		return object.ListObjectVersionsInfo{}, err
+	}
+	for i := range li.Objects {
+		li.Objects[i].VersionID = "null"
+		li.Objects[i].IsLatest = true
+	}
+	return object.ListObjectVersionsInfo{
+		IsTruncated: li.IsTruncated, NextMarker: li.NextMarker,
+		Objects: li.Objects, Prefixes: li.Prefixes,
+	}, nil
+}

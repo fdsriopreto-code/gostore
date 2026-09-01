@@ -122,14 +122,21 @@ func (s *Server) handleSelfTest(w http.ResponseWriter, r *http.Request) {
 	}
 	steps = append(steps, "DeleteBucket")
 
+	mode := "single-disk"
+	drives := 1
+	if si, _ := s.obj.StorageInfo(ctx); si.Backend.Type == "erasure" {
+		mode = "erasure"
+		drives = len(si.Disks)
+	}
 	w.WriteHeader(http.StatusOK)
 	_ = enc.Encode(map[string]any{
-		"ok":            true,
-		"steps":         steps,
-		"bytes":         len(payload),
-		"etag":          oi.ETag,
-		"region":        s.cfg.Region,
-		"mode":          "single-disk",
+		"ok":             true,
+		"steps":          steps,
+		"bytes":          len(payload),
+		"etag":           oi.ETag,
+		"region":         s.cfg.Region,
+		"mode":           mode,
+		"drives":         drives,
 		"durationMillis": time.Since(t0).Milliseconds(),
 	})
 }

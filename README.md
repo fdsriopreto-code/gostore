@@ -55,7 +55,8 @@ web/                    fonte da UI (build -> internal/console)
 | **M1** | Backend single-disk | `ObjectLayer` FS: bucket CRUD, PUT/GET/HEAD/DELETE, ListObjects v1/v2, prefix/delimiter/paginação | ✅ |
 | **M2** | Auth | SigV4 header + presigned + streaming (`aws-chunked` com verificação de assinatura por chunk), credencial root | ✅ |
 | **M3** | Object semantics | multipart upload completo, range (`bytes=`), conditional requests (If-Match/If-None-Match/If-*-Since), ETag multipart (`-N`), metadata `x-amz-meta-*`, CopyObject/CopyObjectPart, DeleteObjects em lote | ✅ |
-| M4 | Erasure coding | RS encode/decode, erasure set sobre N discos locais, `xl.meta` próprio, bitrot, quorum r/w | ⏳ próximo |
+| **M4** | Erasure coding | Reed-Solomon sobre N discos locais (N par, ≥4; paridade = N/2), `xl.meta` próprio replicado, bitrot HighwayHash por stripe/shard, quorum de leitura/escrita, reconstrução automática na leitura, multipart erasure-coded | ✅ |
+| M5 | Server pools | múltiplos sets/pools, hashing de placement por nome de objeto, merge de listagem | ⏳ próximo |
 | M5 | Server pools | múltiplos sets/pools, hashing de placement por nome de objeto, merge de listagem |
 | M6 | Distribuído | disco remoto via RPC, cluster multi-nó, lock distribuído (estilo dsync) |
 | M7 | Healing + scanner | reconstrução automática, scanner de background |
@@ -69,7 +70,23 @@ web/                    fonte da UI (build -> internal/console)
 
 ## Rodando
 
-Build M1–M3 roda em **single-disk** (um volume). Modo erasure/distribuído é M4.
+**Single-disk** (um volume, backend `internal/object/fs`) ou **erasure** (N
+volumes pares, N≥4, backend `internal/erasure`). O modo é escolhido pela
+quantidade de volumes passada ao `server`.
+
+```bash
+# single-disk
+gostore server /data
+
+# erasure: 4 discos (2 dados + 2 paridade) -> aguenta perder 2 discos
+gostore server /data/d1 /data/d2 /data/d3 /data/d4
+# ou com ellipsis
+gostore server /data/d{1...4}
+```
+
+Na mesma máquina, os N volumes podem ser diretórios do mesmo disco físico
+(dá proteção contra bitrot e reconstrução, mas não redundância física) ou —
+ideal — N discos/mounts separados. Cluster multi-nó é M6.
 
 ### Local
 
@@ -165,7 +182,37 @@ Config env: `GOSTORE_ROOT_USER`, `GOSTORE_ROOT_PASSWORD` (>=8), `GOSTORE_REGION`
 `GOSTORE_LOG_LEVEL`, `GOSTORE_LOG_JSON=1`, `GOSTORE_ALLOW_ANONYMOUS=1` (aceita
 requests sem assinatura — só para debug).
 
-## O que funciona hoje (M3)
+## Erasure coding (M4) — como funciona
+
+Cada parte de um objeto é quebrada em *stripes* de `blockSize` (1 MiB) por
+shard de dados. Cada stripe é codificado em `N/2` shards de dados + `N/2`
+shards de paridade (Reed-Solomon), um shard por disco. O objeto sobrevive à
+perda de até `N/2` discos.
+
+- `xl.meta` (JSON) é escrito **idêntico em todos os discos** — metadados
+  sobrevivem à mesma perda; a versão vencedora é escolhida por maioria.
+- **Bitrot**: hash HighwayHash-256 por stripe por shard, guardado no
+  `xl.meta`. Na leitura, um shard cujo hash não bate é descartado e o
+  Reed-Solomon reconstrói a partir dos bons — inclusive em leitura por range.
+- **Quorum**: leitura = `N/2` discos; escrita = `N/2 + 1`.
+- **Multipart**: cada parte é um blob erasure-coded próprio em
+  `.gostore.sys/multipart/<uploadId>/`; no `CompleteMultipartUpload` as
+  partes são decodificadas em streaming e reescritas como as partes do
+  objeto final.
+
+Layout no disco:
+
+```
+<disco>/<bucket>/<key>/xl.meta        cópia completa dos metadados
+<disco>/<bucket>/<key>/part.00001     shard deste disco para a parte 1
+<disco>/.gostore.sys/format.json      identidade do disco
+<disco>/.gostore.sys/tmp/             staging do rename atômico
+```
+
+Ainda **não** tem healing proativo (reescrever shards perdidos de volta ao
+disco) — isso é M7; hoje a reconstrução acontece só em memória na leitura.
+
+## O que funciona hoje (M3 single-disk / M4 erasure)
 
 Service: `ListBuckets`. Bucket: `CreateBucket`, `DeleteBucket`, `HeadBucket`,
 `GetBucketLocation`, `GetBucketVersioning` (retorna vazio), `ListObjects` (v1),
@@ -179,7 +226,8 @@ verificação de assinatura por chunk), credencial root única.
 
 ## O que **não** funciona ainda
 
-Erasure coding / múltiplos discos / cluster (M4–M6) · healing (M7) ·
+Múltiplos server pools (M5) · cluster multi-nó / lock distribuído (M6) ·
+healing proativo + scanner (M7) ·
 IAM/policies/multi-usuário/service accounts (M8) · STS (M9) · versioning real,
 object lock, lifecycle, tagging persistida, bucket policy, CORS enforcement
 (M10 — endpoints hoje são *accept-and-ignore*) · SSE/KMS (M11) · notificações
