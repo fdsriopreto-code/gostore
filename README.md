@@ -56,17 +56,16 @@ web/                    fonte da UI (build -> internal/console)
 | **M2** | Auth | SigV4 header + presigned + streaming (`aws-chunked` com verificação de assinatura por chunk), credencial root | ✅ |
 | **M3** | Object semantics | multipart upload completo, range (`bytes=`), conditional requests (If-Match/If-None-Match/If-*-Since), ETag multipart (`-N`), metadata `x-amz-meta-*`, CopyObject/CopyObjectPart, DeleteObjects em lote | ✅ |
 | **M4** | Erasure coding | Reed-Solomon sobre N discos locais (N par, ≥4; paridade = N/2), `xl.meta` próprio replicado, bitrot HighwayHash por stripe/shard, quorum de leitura/escrita, reconstrução automática na leitura, multipart erasure-coded | ✅ |
-| M5 | Server pools | múltiplos sets/pools, hashing de placement por nome de objeto, merge de listagem | ⏳ próximo |
-| M5 | Server pools | múltiplos sets/pools, hashing de placement por nome de objeto, merge de listagem |
-| M6 | Distribuído | disco remoto via RPC, cluster multi-nó, lock distribuído (estilo dsync) |
-| M7 | Healing + scanner | reconstrução automática, scanner de background |
-| M8 | IAM | store de user/group/policy, engine de policy AWS, service accounts, admin API |
-| M9 | STS | AssumeRole, AssumeRoleWithWebIdentity |
-| M10 | Bucket features | versioning -> object lock -> lifecycle -> tagging -> bucket policy -> CORS |
-| M11 | Encryption | SSE-S3 / SSE-KMS / SSE-C + KMS local |
-| M12 | Eventos | notificações + targets (webhook) |
-| M13 | Replicação | replicação de bucket |
-| M14 | Console | UI web |
+| **M5** | Server pools | 1 erasure set por argumento do `server`, todos formam 1 pool; placement por hash do nome; listagem faz merge entre sets | ✅ |
+| M6 | Distribuído | disco remoto via RPC, cluster multi-nó, lock distribuído (estilo dsync) | ⏳ **pendente** (precisa de protocolo RPC + consenso; não dá pra apressar com segurança) |
+| **M7** | Healing (lite) | `POST /gostore/admin/v1/heal`: varre e reescreve `xl.meta`/shards perdidos ou corrompidos, reconstruindo a partir dos bons. Scanner de background ainda não. | ✅ (parcial) |
+| **M8** | IAM | usuários, service accounts, policies AWS (engine própria: Effect/Action/Resource/Condition, deny-vence), 5 canned policies, admin API `/gostore/admin/v1/`, estado JSON replicado. Grupos ainda não. | ✅ |
+| **M9** | STS | `AssumeRole` (credenciais temporárias em memória com a policy do chamador ± policy inline). `AssumeRoleWithWebIdentity` (OIDC) ainda não. | ✅ (parcial) |
+| **M10** | Bucket features | tagging (bucket + objeto), bucket policy (com Principal, habilita acesso anônimo/público), CORS (preflight + headers). **Versioning real e object lock/WORM: pendentes** (mudança profunda no storage layer). | ✅ (parcial) |
+| M11 | Encryption | SSE-S3 / SSE-KMS / SSE-C + KMS local | ⏳ **pendente** |
+| **M12** | Eventos | notificação de bucket → webhooks (filtro por evento/prefix/suffix, retry async) | ✅ |
+| M13 | Replicação | replicação de bucket | ⏳ pendente |
+| **M14** | Console | SPA embutida (`go:embed`), servida em `/gostore/console/` na mesma origem da API; assina SigV4 no browser (Web Crypto). Buckets, objetos (upload/download/navegação), usuários/service accounts, monitoramento + heal. | ✅ |
 
 ## Rodando
 
@@ -130,12 +129,14 @@ diretório do host prevalece, então antes:
    como root, então mount root-owned do painel funciona sem chown.
 5. Deploy. Domínio do painel -> serviço, porta `9000`.
 
-**Validar sem CLI:** abre no navegador
-`https://SEU_DOMINIO/gostore/health/selftest` — o servidor faz um round-trip
-interno (MakeBucket -> PutObject -> GetObject -> verifica bytes -> ListObjectsV2
--> DeleteObject -> DeleteBucket) e responde JSON `{"ok": true, "steps": [...]}`.
-Se vier `ok:true`, o engine de storage tá 100%. (Desabilita com
-`GOSTORE_DISABLE_SELFTEST=1`.)
+**Console web:** `https://SEU_DOMINIO/gostore/console/` — login com o
+access/secret key, browse de buckets e objetos, upload/download, gestão de
+usuários e service accounts, monitoramento.
+
+**Validar sem CLI:** abre `https://SEU_DOMINIO/gostore/health/selftest` — o
+servidor faz um round-trip interno (MakeBucket -> PutObject -> GetObject ->
+verifica bytes -> ListObjectsV2 -> DeleteObject -> DeleteBucket) e responde
+JSON `{"ok": true, "steps": [...]}`. (Desabilita com `GOSTORE_DISABLE_SELFTEST=1`.)
 
 Depois é só apontar `mc` / `aws` / SDK do seu PC pro `https://SEU_DOMINIO`
 (path-style) com as credenciais acima.
@@ -212,28 +213,42 @@ Layout no disco:
 Ainda **não** tem healing proativo (reescrever shards perdidos de volta ao
 disco) — isso é M7; hoje a reconstrução acontece só em memória na leitura.
 
-## O que funciona hoje (M3 single-disk / M4 erasure)
+## O que funciona hoje
 
-Service: `ListBuckets`. Bucket: `CreateBucket`, `DeleteBucket`, `HeadBucket`,
-`GetBucketLocation`, `GetBucketVersioning` (retorna vazio), `ListObjects` (v1),
-`ListObjectsV2`, `ListObjectVersions` (só versão `null`), `DeleteObjects` (lote).
+**S3 API** — Service: `ListBuckets`. Bucket: `CreateBucket`, `DeleteBucket`,
+`HeadBucket`, `GetBucketLocation`, `GetBucketVersioning` (vazio),
+`Get/Put/DeleteBucketPolicy`, `Get/Put/DeleteBucketTagging`,
+`Get/Put/DeleteBucketCors`, `Get/PutBucketNotification`, `ListObjects` (v1),
+`ListObjectsV2`, `ListObjectVersions` (versão `null`), `DeleteObjects` (lote).
 Object: `PutObject` (incl. `aws-chunked` streaming), `GetObject` (Range +
-condicionais), `HeadObject`, `DeleteObject`, `CopyObject`. Multipart:
-`CreateMultipartUpload`, `UploadPart`, `UploadPartCopy`, `ListParts`,
-`ListMultipartUploads`, `CompleteMultipartUpload`, `AbortMultipartUpload`.
-Auth: AWS SigV4 (Authorization header + URL presignada + streaming com
-verificação de assinatura por chunk), credencial root única.
+condicionais), `HeadObject`, `DeleteObject`, `CopyObject`,
+`Get/Put/DeleteObjectTagging`. Multipart completo (`Create`/`UploadPart`/
+`UploadPartCopy`/`ListParts`/`ListMultipartUploads`/`Complete`/`Abort`).
+
+**Auth & IAM** — SigV4 (header + presigned + streaming), múltiplos usuários,
+service accounts, policies AWS (engine própria, `deny` vence), 5 canned
+policies, bucket policy (com acesso anônimo/público via `Principal:*`), STS
+`AssumeRole`. Admin API em `/gostore/admin/v1/` (info, users, policies,
+service-accounts, heal). Estado IAM/bucket-config em JSON replicado nos
+volumes — **sem banco de dados**.
+
+**Storage** — single-disk ou erasure (1+ sets num pool); reconstrução na
+leitura + `heal` sob demanda; bitrot HighwayHash.
+
+**Extras** — notificações via webhook; CORS; console web embutido.
 
 ## O que **não** funciona ainda
 
-Múltiplos server pools (M5) · cluster multi-nó / lock distribuído (M6) ·
-healing proativo + scanner (M7) ·
-IAM/policies/multi-usuário/service accounts (M8) · STS (M9) · versioning real,
-object lock, lifecycle, tagging persistida, bucket policy, CORS enforcement
-(M10 — endpoints hoje são *accept-and-ignore*) · SSE/KMS (M11) · notificações
-(M12) · replicação (M13) · console web (M14 — hoje é uma página de status).
+- **Cluster multi-nó** (M6) — hoje é single-node (1+ discos locais). Precisa
+  de RPC entre nós + lock distribuído.
+- **Versioning real e Object Lock / WORM** (M10) — endpoints de versioning
+  são *accept-and-ignore*; toda operação é sobre a versão corrente.
+- **SSE / KMS** (M11) — sem criptografia em repouso.
+- **Replicação de bucket** (M13).
+- **Scanner de background** (M7) — o heal é sob demanda (`POST .../heal`).
+- Grupos IAM, `AssumeRoleWithWebIdentity` (OIDC/LDAP), lifecycle/ILM.
 
-## Formato on-disk (M1–M3)
+## Formato on-disk
 
 ```
 <volume>/<bucket>/<key>                              dados do objeto (espelha a key)
@@ -244,8 +259,12 @@ object lock, lifecycle, tagging persistida, bucket policy, CORS enforcement
 <volume>/.gostore.sys/tmp/                            staging de escrita atômica (rename)
 ```
 
-Escrita é atômica via `write-tmp + fsync + rename`. O layout `xl.meta`
-(diretório por objeto, MessagePack) entra no M4.
+(single-disk mostrado; no modo erasure é `<disco>/<bucket>/<key>/xl.meta` +
+`part.NNNNN`.) Além disso, replicado em `<vol>/.gostore.sys/`:
+`iam/store.json` (usuários/policies/service-accounts) e
+`bucketcfg/config.json` (policy/CORS/tags/notification por bucket).
+
+Escrita é atômica via `write-tmp + fsync + rename`.
 
 ## Testes
 
@@ -253,7 +272,13 @@ Escrita é atômica via `write-tmp + fsync + rename`. O layout `xl.meta`
 go test ./...
 ```
 
-Cobre: CRUD de bucket/objeto, listagem com prefix/delimiter/paginação, multipart
-round-trip + rejeição de part pequena, CopyObject, e no nível HTTP: fluxo S3
-completo assinado com SigV4, Range, rejeição de assinatura inválida, e upload
-`STREAMING-AWS4-HMAC-SHA256-PAYLOAD` com cadeia de assinatura por chunk.
+Cobre: CRUD de bucket/objeto, listagem prefix/delimiter/paginação, multipart
+round-trip + rejeição de part pequena, CopyObject; erasure — round-trip em
+vários tamanhos, range straddling stripes, sobrevivência a perda de N/2
+discos + falha limpa além disso, bitrot detectado+reparado, heal reescreve
+shards, server pools (60 chaves em 3 sets); IAM — engine de policy
+(wildcards, deny-vence, resource scoping), enforcement por usuário,
+persistência, service account herda+restringe; HTTP e2e — fluxo S3 assinado
+com SigV4, streaming chunked com cadeia de assinatura, bucket policy
+public-read (anon GET ok / anon PUT 403), object tagging. O signer SigV4 do
+console (Web Crypto) é validado ponta-a-ponta contra o servidor.
