@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/lojadopocket/gostore/internal/erasure"
 	"github.com/lojadopocket/gostore/internal/iam"
 	"github.com/lojadopocket/gostore/internal/iam/policy"
 	"github.com/lojadopocket/gostore/internal/storage"
@@ -36,6 +37,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case path == "info" && r.Method == http.MethodGet:
 		s.adminInfo(w, r)
+	case path == "heal" && r.Method == http.MethodPost:
+		s.adminHeal(w, r)
 	case path == "users" && r.Method == http.MethodGet:
 		writeJSON(w, http.StatusOK, s.iam.ListUsers())
 	case path == "users" && r.Method == http.MethodPut:
@@ -104,6 +107,22 @@ func (s *Server) adminInfo(w http.ResponseWriter, r *http.Request) {
 		"users":        len(s.iam.ListUsers()),
 		"policies":     len(s.iam.ListPolicies()),
 	})
+}
+
+func (s *Server) adminHeal(w http.ResponseWriter, r *http.Request) {
+	pool, ok := s.obj.(*erasure.Pool)
+	if !ok {
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status": "no-op", "reason": "single-disk backend has no redundancy to heal",
+		})
+		return
+	}
+	rep, err := pool.Heal(r.Context())
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
 }
 
 func backendMode(t string) string {

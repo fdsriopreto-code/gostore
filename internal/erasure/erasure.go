@@ -137,6 +137,9 @@ func (e *Erasure) DecodeData(shards [][]byte, dataLen int, w io.Writer) error {
 	return e.enc.Join(w, shards, dataLen)
 }
 
+// Reconstruct fills nil shards in place from the present ones.
+func (e *Erasure) Reconstruct(shards [][]byte) error { return e.enc.Reconstruct(shards) }
+
 func ceilInt64(a, b int64) int64 { return (a + b - 1) / b }
 
 // defaultParity returns the standard parity count for n disks (n/2, like

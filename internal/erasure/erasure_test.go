@@ -160,6 +160,43 @@ func TestSurvivesDiskLoss(t *testing.T) {
 	}
 }
 
+func TestHealRewritesLostAndCorruptShards(t *testing.T) {
+	p, roots := newTestPool(t, 6) // 3 data + 3 parity
+	_ = p.MakeBucket(ctx(), "buck", object.MakeBucketOptions{})
+	data := make([]byte, blockSizeV2*3+9000)
+	_, _ = rand.Read(data)
+	put(t, p, "buck", "obj", data)
+
+	// disk 0: wipe the whole object dir. disk 1: corrupt the shard.
+	if err := os.RemoveAll(filepath.Join(roots[0], "buck", "obj")); err != nil {
+		t.Fatal(err)
+	}
+	shard := filepath.Join(roots[1], "buck", "obj", "part.00001")
+	b, _ := os.ReadFile(shard)
+	for i := 0; i < 128 && i < len(b); i++ {
+		b[i] ^= 0xAA
+	}
+	_ = os.WriteFile(shard, b, 0o644)
+
+	rep, err := p.Heal(ctx())
+	if err != nil {
+		t.Fatalf("Heal: %v", err)
+	}
+	if rep.ObjectsHealed == 0 || rep.ShardsRewritten < 2 {
+		t.Fatalf("unexpected heal report: %+v", rep)
+	}
+
+	// After healing, every disk must hold a byte-correct, bitrot-valid shard:
+	// wiping any 3 more disks and reading must still succeed.
+	for i := 2; i < 5; i++ {
+		_ = os.RemoveAll(filepath.Join(roots[i], "buck", "obj"))
+	}
+	got := get(t, p, "buck", "obj")
+	if !bytes.Equal(got, data) {
+		t.Fatal("post-heal read after fresh 3-disk loss failed")
+	}
+}
+
 func TestBitrotDetectedAndRepaired(t *testing.T) {
 	p, roots := newTestPool(t, 4) // 2 data + 2 parity
 	_ = p.MakeBucket(ctx(), "buck", object.MakeBucketOptions{})

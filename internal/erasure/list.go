@@ -11,55 +11,52 @@ import (
 )
 
 // walkKeys returns every object key in the bucket (slash-separated, sorted).
-// An object is any directory that directly contains an xl.meta file. M4 walks
-// the first online disk; cross-disk merge for partial namespaces is M7.
+// An object is any directory that directly contains an xl.meta file. It
+// unions the namespace across every online disk so a disk that is missing
+// some objects does not hide them from listings or healing.
 func (s *Set) walkKeys(ctx context.Context, bucket string) ([]string, error) {
-	var disk Disk
-	for _, d := range s.disks {
-		if d.IsOnline() {
-			disk = d
-			break
+	found := map[string]struct{}{}
+	online := 0
+	for _, disk := range s.disks {
+		if !disk.IsOnline() {
+			continue
 		}
-	}
-	if disk == nil {
-		return nil, ErrReadQuorum
-	}
-
-	var keys []string
-	var rec func(prefix string) error
-	rec = func(prefix string) error {
-		entries, err := disk.ListDir(ctx, bucket, prefix)
-		if err != nil {
-			return err
-		}
-		isObject := false
-		for _, e := range entries {
-			if e == metaFile {
-				isObject = true
-				break
+		online++
+		var rec func(prefix string) error
+		rec = func(prefix string) error {
+			entries, err := disk.ListDir(ctx, bucket, prefix)
+			if err != nil {
+				return err
 			}
-		}
-		if isObject {
-			if prefix != "" {
-				keys = append(keys, strings.TrimSuffix(prefix, "/"))
+			for _, e := range entries {
+				if e == metaFile {
+					if prefix != "" {
+						found[strings.TrimSuffix(prefix, "/")] = struct{}{}
+					}
+					return nil
+				}
+			}
+			for _, e := range entries {
+				if !strings.HasSuffix(e, "/") {
+					continue
+				}
+				if prefix == "" && e == ".gostore.sys/" {
+					continue
+				}
+				if err := rec(path.Join(prefix, e) + "/"); err != nil {
+					return err
+				}
 			}
 			return nil
 		}
-		for _, e := range entries {
-			if !strings.HasSuffix(e, "/") {
-				continue
-			}
-			if prefix == "" && e == ".gostore.sys/" {
-				continue
-			}
-			if err := rec(path.Join(prefix, e) + "/"); err != nil {
-				return err
-			}
-		}
-		return nil
+		_ = rec("")
 	}
-	if err := rec(""); err != nil {
-		return nil, err
+	if online == 0 {
+		return nil, ErrReadQuorum
+	}
+	keys := make([]string, 0, len(found))
+	for k := range found {
+		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 	return keys, nil
