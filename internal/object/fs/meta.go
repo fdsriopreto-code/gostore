@@ -22,7 +22,13 @@ type objMeta struct {
 	UserMeta    map[string]string `json:"userMeta,omitempty"` // without x-amz-meta- prefix
 	UserTags    string            `json:"userTags,omitempty"`
 	Parts       []objMetaPart     `json:"parts,omitempty"` // set for multipart objects
-	// VersionID/DeleteMarker land in M10.
+
+	// SSE-S3 at rest (M11). When SSE == "AES256": Size is the ciphertext size
+	// on disk, PlainSize the logical object size, ETag the plaintext md5.
+	SSE         string `json:"sse,omitempty"`
+	PlainSize   int64  `json:"plainSize,omitempty"`
+	EncDEK      string `json:"encDEK,omitempty"`      // hex, master-key-wrapped data key
+	NoncePrefix string `json:"noncePrefix,omitempty"` // hex, 4 bytes
 }
 
 type objMetaPart struct {
@@ -33,10 +39,14 @@ type objMetaPart struct {
 }
 
 func (m objMeta) toObjectInfo(bucket, name string) object.ObjectInfo {
+	size := m.Size
+	if m.SSE != "" {
+		size = m.PlainSize
+	}
 	oi := object.ObjectInfo{
 		Bucket:          bucket,
 		Name:            name,
-		Size:            m.Size,
+		Size:            size,
 		ModTime:         m.ModTime,
 		ETag:            m.ETag,
 		ContentType:     m.ContentType,
@@ -51,6 +61,9 @@ func (m objMeta) toObjectInfo(bucket, name string) object.ObjectInfo {
 	}
 	if m.ContentType != "" {
 		oi.UserDefined["content-type"] = m.ContentType
+	}
+	if m.SSE != "" {
+		oi.UserDefined["x-amz-server-side-encryption"] = m.SSE
 	}
 	for _, p := range m.Parts {
 		oi.Parts = append(oi.Parts, object.ObjectPartInfo{

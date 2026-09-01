@@ -30,6 +30,7 @@ import (
 	"github.com/lojadopocket/gostore/internal/erasure"
 	"github.com/lojadopocket/gostore/internal/event"
 	"github.com/lojadopocket/gostore/internal/iam"
+	"github.com/lojadopocket/gostore/internal/kms"
 	"github.com/lojadopocket/gostore/internal/logger"
 	"github.com/lojadopocket/gostore/internal/object"
 	fsbackend "github.com/lojadopocket/gostore/internal/object/fs"
@@ -133,12 +134,18 @@ func runServer(args []string) error {
 		"mode", modeString(cfg),
 	)
 
+	km, err := kms.New(cfg.Volumes)
+	if err != nil {
+		return fmt.Errorf("init KMS: %w", err)
+	}
+
 	var obj object.Layer
 	if cfg.SingleDisk() {
 		backend, err := fsbackend.New(cfg.VolumeGroups[0][0])
 		if err != nil {
 			return fmt.Errorf("open volume %s: %w", cfg.VolumeGroups[0][0], err)
 		}
+		backend.SetKMS(km)
 		obj = backend
 	} else {
 		sets := make([]*erasure.Set, len(cfg.VolumeGroups))

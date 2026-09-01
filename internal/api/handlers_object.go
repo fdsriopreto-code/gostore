@@ -45,6 +45,9 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, bucket,
 	if oi.VersionID != "" {
 		w.Header().Set("x-amz-version-id", oi.VersionID)
 	}
+	if v := oi.UserDefined["x-amz-server-side-encryption"]; v != "" {
+		w.Header().Set("x-amz-server-side-encryption", v)
+	}
 	s.notify(r, event.ObjectCreated, bucket, key, oi.Size, oi.ETag)
 	writeSuccessOK(w)
 }
@@ -208,6 +211,10 @@ func writeObjectHeaders(w http.ResponseWriter, oi object.ObjectInfo, region stri
 		if lk == "content-type" || lk == "content-encoding" || lk == "etag" {
 			continue
 		}
+		if lk == "x-amz-server-side-encryption" {
+			h.Set("x-amz-server-side-encryption", v)
+			continue
+		}
 		h.Set("x-amz-meta-"+lk, v)
 	}
 	if oi.UserTags != "" {
@@ -259,7 +266,10 @@ func extractMetadata(r *http.Request) map[string]string {
 	}
 	for k, vs := range r.Header {
 		lk := strings.ToLower(k)
-		if strings.HasPrefix(lk, "x-amz-meta-") && len(vs) > 0 {
+		if len(vs) == 0 {
+			continue
+		}
+		if strings.HasPrefix(lk, "x-amz-meta-") || lk == "x-amz-server-side-encryption" {
 			md[lk] = vs[0]
 		}
 	}

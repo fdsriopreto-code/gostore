@@ -22,6 +22,7 @@ import (
 	"github.com/lojadopocket/gostore/internal/config"
 	"github.com/lojadopocket/gostore/internal/event"
 	"github.com/lojadopocket/gostore/internal/iam"
+	"github.com/lojadopocket/gostore/internal/kms"
 	fsbackend "github.com/lojadopocket/gostore/internal/object/fs"
 )
 
@@ -40,6 +41,9 @@ func newTestServer(t *testing.T) *httptest.Server {
 	cfg := config.Default()
 	cfg.Region = region
 	dir := t.TempDir()
+	if km, kerr := kms.New([]string{dir}); kerr == nil {
+		backend.SetKMS(km)
+	}
 	im, err := iam.New(testAK, testSK, []string{dir})
 	if err != nil {
 		t.Fatal(err)
@@ -365,6 +369,50 @@ func TestBucketVersioningHTTP(t *testing.T) {
 	lv = readBody(t, do(t, srv, http.MethodGet, "/vbk?versions", nil, nil))
 	if strings.Count(lv, "<Version>") != 1 {
 		t.Fatalf("after permanent delete want 1 Version: %s", lv)
+	}
+}
+
+func TestSSES3HTTP(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.Close()
+	do(t, srv, http.MethodPut, "/enc", []byte{}, nil).Body.Close()
+
+	payload := bytes.Repeat([]byte("secret-"), 20000) // ~140 KB, multi-chunk
+	r := do(t, srv, http.MethodPut, "/enc/data.bin", payload,
+		map[string]string{"x-amz-server-side-encryption": "AES256"})
+	if r.StatusCode != 200 || r.Header.Get("x-amz-server-side-encryption") != "AES256" {
+		t.Fatalf("PUT sse: %d hdr=%q", r.StatusCode, r.Header.Get("x-amz-server-side-encryption"))
+	}
+	if strings.Trim(r.Header.Get("ETag"), `"`) != md5hex(payload) {
+		t.Fatalf("sse etag should be plaintext md5")
+	}
+	r.Body.Close()
+
+	g := do(t, srv, http.MethodGet, "/enc/data.bin", nil, nil)
+	if g.Header.Get("x-amz-server-side-encryption") != "AES256" {
+		t.Fatalf("GET missing sse header: %v", g.Header)
+	}
+	if got := readBody(t, g); got != string(payload) {
+		t.Fatalf("sse round-trip mismatch: %d vs %d", len(got), len(payload))
+	}
+
+	// HEAD reports the plaintext size
+	h := do(t, srv, http.MethodHead, "/enc/data.bin", nil, nil)
+	if h.ContentLength != int64(len(payload)) {
+		t.Fatalf("HEAD content-length %d want %d", h.ContentLength, len(payload))
+	}
+	h.Body.Close()
+
+	// range GET on an encrypted object
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/enc/data.bin", nil)
+	req.Header.Set("Range", "bytes=65530-65550")
+	signV4(t, req, nil)
+	rr, _ := srv.Client().Do(req)
+	if rr.StatusCode != http.StatusPartialContent {
+		t.Fatalf("range status %d", rr.StatusCode)
+	}
+	if got := readBody(t, rr); got != string(payload[65530:65551]) {
+		t.Fatalf("encrypted range mismatch: %q", got)
 	}
 }
 

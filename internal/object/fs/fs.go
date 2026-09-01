@@ -46,7 +46,19 @@ type FS struct {
 	nsLock map[string]*sync.RWMutex
 
 	format diskFormat
+	kms    kmsWrapper
 }
+
+// kmsWrapper is the subset of *kms.Manager the fs backend needs (kept as an
+// interface so tests don't need a real KMS).
+type kmsWrapper interface {
+	GenerateDataKey() ([]byte, error)
+	WrapKey(dek []byte) ([]byte, error)
+	UnwrapKey(wrapped []byte) ([]byte, error)
+}
+
+// SetKMS enables SSE-S3 at-rest encryption using the given key manager.
+func (f *FS) SetKMS(k kmsWrapper) { f.kms = k }
 
 type diskFormat struct {
 	Version int    `json:"version"`

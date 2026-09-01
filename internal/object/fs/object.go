@@ -58,7 +58,16 @@ func (f *FS) PutObject(ctx context.Context, bucket, obj string, data *object.Put
 		return object.ObjectInfo{}, err
 	}
 
-	tmp, n, md5hex, err := f.copyToTmpAndHash(data, data.Size())
+	var tmp, md5hex string
+	var n int64
+	var sseMeta objMeta
+	var err error
+	encrypt := f.sseRequested(opts)
+	if encrypt {
+		tmp, n, md5hex, sseMeta, err = f.encryptToTmp(data, data.Size())
+	} else {
+		tmp, n, md5hex, err = f.copyToTmpAndHash(data, data.Size())
+	}
 	if err != nil {
 		return object.ObjectInfo{}, err
 	}
@@ -81,6 +90,14 @@ func (f *FS) PutObject(ctx context.Context, bucket, obj string, data *object.Put
 		ContentEnc:  opts.UserDefined["content-encoding"],
 		UserMeta:    stripReserved(opts.UserDefined),
 		UserTags:    opts.UserTags,
+	}
+	if encrypt {
+		st, _ := os.Stat(dataPath)
+		m.Size = st.Size()
+		m.SSE = sseMeta.SSE
+		m.PlainSize = sseMeta.PlainSize
+		m.EncDEK = sseMeta.EncDEK
+		m.NoncePrefix = sseMeta.NoncePrefix
 	}
 	if err := writeMetaFile(f.objMetaPath(bucket, obj), m); err != nil {
 		return object.ObjectInfo{}, err
@@ -198,6 +215,30 @@ func (f *FS) GetObjectNInfo(_ context.Context, bucket, obj string, rs *object.HT
 	if opts.CheckPrecondFn != nil && opts.CheckPrecondFn(oi) {
 		lk.RUnlock(ctx2)
 		return nil, object.ErrPreconditionFailed
+	}
+
+	// Encrypted object (non-versioned path): decrypt transparently.
+	if !versioned {
+		if m, merr := readMetaFile(f.objMetaPath(bucket, obj)); merr == nil && m.SSE != "" {
+			var start, length int64 = 0, oi.Size
+			if rs != nil {
+				start, length, err = resolveRange(rs, oi.Size)
+				if err != nil {
+					lk.RUnlock(ctx2)
+					return nil, err
+				}
+				oi.Size = length
+			}
+			rc, derr := f.openDecrypting(f.objDataPath(bucket, obj), m, start, length)
+			if derr != nil {
+				lk.RUnlock(ctx2)
+				return nil, derr
+			}
+			return &object.GetObjectReader{
+				ObjInfo:    oi,
+				ReadCloser: &decCloserUnlock{r: rc, onClose: func() { lk.RUnlock(ctx2) }},
+			}, nil
+		}
 	}
 
 	var fh *os.File
