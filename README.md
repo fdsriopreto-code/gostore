@@ -20,32 +20,37 @@ Paridade funcional com o MinIO full:
 - Replicação de bucket
 - Console web
 
-## Arquitetura (alvo)
+## Arquitetura (estado atual)
 
 ```
-cmd/gostore/            entrypoint, subcomando `server`, bootstrap, graceful shutdown
+cmd/gostore/       entrypoint `server`, bootstrap, graceful shutdown, scanner loop
 internal/
-  config/               carga de config (flags + env GOSTORE_*), validação
-  logger/               logging estruturado (slog)
-  api/                  camada HTTP S3
-    router.go           roteamento (path-style / vhost-style / sub-resources por query)
-    handlers_*.go       handlers de bucket / object / multipart
-    errors.go           códigos de erro S3 -> XML
-    xml.go              tipos de request/response S3
-    middleware.go       request-id, logging, recover, auth
-  auth/                 AWS Signature V4/V2, presigned, streaming (aws-chunked)
-  iam/                  store de identidades; policy/ engine de avaliação; sts.go
-  object/               ObjectLayer (abstração central) + types + errors
-  storage/              StorageAPI (ops por disco); local.go (FS); remote/ (RPC p/ nós)
-  erasure/              Reed-Solomon; set.go; pool.go; server_pools.go; metadata (xl.meta);
-                        bitrot.go; heal.go; quorum.go
-  bucket/               versioning/ lifecycle/ lock/ tagging/ policy/ replication/ notification/
-  crypto/ kms/          SSE + KMS
-  event/                barramento de eventos + targets
-  scanner/              data scanner de background (uso de disco, ILM, trigger de heal)
-  console/              UI web embutida (go:embed) + admin API
-web/                    fonte da UI (build -> internal/console)
+  config/          config (flags + env GOSTORE_*), grupos de volumes, validação
+  logger/          logging estruturado (slog)
+  auth/            AWS SigV4 (header / presigned / aws-chunked streaming) — primitivas
+  api/             camada HTTP S3 + admin: router, ~30 códigos de erro S3->XML,
+                   authenticate + authorize (IAM + bucket policy), handlers de
+                   service/bucket/object/multipart/tagging/policy/cors/notification/
+                   versioning/object-lock/replication/lifecycle, STS, admin API,
+                   /gostore/console (SPA), /gostore/health/*
+  object/          object.Layer (abstração central) + types + errors
+  object/fs/       backend single-disk: CRUD, multipart, range, versioning real,
+                   object lock (WORM), SSE-S3, tagging
+  storage/         StorageAPI + LocalDisk (uma pasta = um "disco" do erasure)
+  erasure/         Reed-Solomon (klauspost), Set (N discos) + Pool (N sets),
+                   xl.meta replicado, bitrot HighwayHash por stripe, quorum, heal
+  iam/             usuários / service accounts / STS + iam/policy engine AWS
+  kms/  sse/       master key local + AES-256-GCM em chunks (SSE-S3)
+  bucketcfg/       config por bucket (policy, CORS, tags, notification, versioning,
+                   object-lock, replication, lifecycle) — JSON replicado nos volumes
+  event/           barramento de notificação -> webhooks
+  replication/     cópia async pra bucket local ou endpoint S3 remoto
+  scanner/         scanner de background: expiração ILM, abort de multipart velho
+  console/         SPA embutida (go:embed) servida pela própria API
 ```
+
+**Sem banco de dados.** Tudo — dados, xl.meta, IAM, config de bucket — vive nos
+volumes.
 
 ## Milestones (ordem de dependência — cada um roda de verdade)
 
@@ -58,14 +63,15 @@ web/                    fonte da UI (build -> internal/console)
 | **M4** | Erasure coding | Reed-Solomon sobre N discos locais (N par, ≥4; paridade = N/2), `xl.meta` próprio replicado, bitrot HighwayHash por stripe/shard, quorum de leitura/escrita, reconstrução automática na leitura, multipart erasure-coded | ✅ |
 | **M5** | Server pools | 1 erasure set por argumento do `server`, todos formam 1 pool; placement por hash do nome; listagem faz merge entre sets | ✅ |
 | M6 | Distribuído | disco remoto via RPC, cluster multi-nó, lock distribuído (estilo dsync) | ⏳ **pendente** (precisa de protocolo RPC + consenso; não dá pra apressar com segurança) |
-| **M7** | Healing (lite) | `POST /gostore/admin/v1/heal`: varre e reescreve `xl.meta`/shards perdidos ou corrompidos, reconstruindo a partir dos bons. Scanner de background ainda não. | ✅ (parcial) |
-| **M8** | IAM | usuários, service accounts, policies AWS (engine própria: Effect/Action/Resource/Condition, deny-vence), 5 canned policies, admin API `/gostore/admin/v1/`, estado JSON replicado. Grupos ainda não. | ✅ |
-| **M9** | STS | `AssumeRole` (credenciais temporárias em memória com a policy do chamador ± policy inline). `AssumeRoleWithWebIdentity` (OIDC) ainda não. | ✅ (parcial) |
-| **M10** | Bucket features | tagging (bucket + objeto), bucket policy (com Principal, habilita acesso anônimo/público), CORS (preflight + headers). **Versioning real e object lock/WORM: pendentes** (mudança profunda no storage layer). | ✅ (parcial) |
-| M11 | Encryption | SSE-S3 / SSE-KMS / SSE-C + KMS local | ⏳ **pendente** |
-| **M12** | Eventos | notificação de bucket → webhooks (filtro por evento/prefix/suffix, retry async) | ✅ |
-| M13 | Replicação | replicação de bucket | ⏳ pendente |
-| **M14** | Console | SPA embutida (`go:embed`), servida em `/gostore/console/` na mesma origem da API; assina SigV4 no browser (Web Crypto). Buckets, objetos (upload/download/navegação), usuários/service accounts, monitoramento + heal. | ✅ |
+| M6 | Distribuído | disco remoto via RPC, cluster multi-nó, lock distribuído (estilo dsync) | ⏳ **pendente** — fronteira honesta: precisa de protocolo entre nós + consenso, não dá pra apressar sem risco de split-brain |
+| **M7** | Healing (lite) | `POST /gostore/admin/v1/heal`: varre e reescreve `xl.meta`/shards perdidos ou corrompidos. Scanner de background faz ILM (heal proativo ainda não). | ✅ (parcial) |
+| **M8** | IAM | usuários, service accounts, engine de policy AWS própria (Effect/Action/NotAction/Resource/Condition, Principal, deny-vence), 5 canned policies, admin API `/gostore/admin/v1/`, estado JSON replicado. Grupos ainda não. | ✅ |
+| **M9** | STS | `AssumeRole` (credenciais temporárias em memória, policy do chamador ∩ policy inline). OIDC/LDAP ainda não. | ✅ (parcial) |
+| **M10** | Bucket features | **versioning real** (versões, `?versionId`, delete markers, `ListObjectVersions`), **Object Lock / WORM** (GOVERNANCE/COMPLIANCE + legal hold, bypass com check de IAM), **lifecycle/ILM** (expiração via scanner), tagging (bucket+objeto), bucket policy (com Principal → anônimo/público), CORS (preflight + headers). *Só no backend single-disk.* | ✅ |
+| **M11** | Encryption | **SSE-S3**: KMS local (master key) + AES-256-GCM em chunks de 64 KiB (stream + range), ETag = md5 do plaintext, transparente no PUT/GET. SSE-KMS/SSE-C ainda não; só single-disk. | ✅ (parcial) |
+| **M12** | Eventos | notificação de bucket → webhooks (filtro evento/prefix/suffix, retry async) | ✅ |
+| **M13** | Replicação | cópia async de objetos (PUT/DELETE) pra bucket local ou endpoint S3 remoto (SigV4), filtro por prefixo. Sem fila de retry persistente. | ✅ (lite) |
+| **M14** | Console | SPA embutida (`go:embed`) servida em `/gostore/console/` na mesma origem da API; assina SigV4 no browser (Web Crypto). Buckets, objetos (drag&drop, drawer, links presigned, versões), usuários/service accounts, editores de policy/CORS/lifecycle/replicação/versioning, monitoramento + heal. | ✅ |
 
 ## Rodando
 
@@ -181,7 +187,9 @@ aws --endpoint-url http://localhost:9000 s3api head-object --bucket meu-bucket -
 Config env: `GOSTORE_ROOT_USER`, `GOSTORE_ROOT_PASSWORD` (>=8), `GOSTORE_REGION`,
 `GOSTORE_ADDRESS`, `GOSTORE_CONSOLE_ADDRESS`, `GOSTORE_DOMAIN` (vhost-style),
 `GOSTORE_LOG_LEVEL`, `GOSTORE_LOG_JSON=1`, `GOSTORE_ALLOW_ANONYMOUS=1` (aceita
-requests sem assinatura — só para debug).
+requests sem assinatura — só debug), `GOSTORE_KMS_MASTER_KEY` (base64 de 32
+bytes; senão é gerada em `.gostore.sys/kms/master.key`), `GOSTORE_SCAN_INTERVAL`
+(ex. `30m`; default `1h`), `GOSTORE_DISABLE_SELFTEST=1`.
 
 ## Erasure coding (M4) — como funciona
 
@@ -225,28 +233,47 @@ condicionais), `HeadObject`, `DeleteObject`, `CopyObject`,
 `Get/Put/DeleteObjectTagging`. Multipart completo (`Create`/`UploadPart`/
 `UploadPartCopy`/`ListParts`/`ListMultipartUploads`/`Complete`/`Abort`).
 
+Bucket sub-resources: `?policy`, `?tagging`, `?cors`, `?notification`,
+`?versioning`, `?object-lock`, `?replication`, `?lifecycle`. Object:
+`?tagging`, `?retention`, `?legal-hold`, `?versionId`.
+
 **Auth & IAM** — SigV4 (header + presigned + streaming), múltiplos usuários,
-service accounts, policies AWS (engine própria, `deny` vence), 5 canned
-policies, bucket policy (com acesso anônimo/público via `Principal:*`), STS
-`AssumeRole`. Admin API em `/gostore/admin/v1/` (info, users, policies,
-service-accounts, heal). Estado IAM/bucket-config em JSON replicado nos
-volumes — **sem banco de dados**.
+service accounts, engine de policy AWS própria (`deny` vence, Principal,
+condições String*/IpAddress), 5 canned policies, bucket policy (anônimo/
+público via `Principal:*`), STS `AssumeRole`, `s3:BypassGovernanceRetention`.
+Admin API `/gostore/admin/v1/` (info, users, policies, service-accounts,
+heal, scanner/run). Estado em JSON replicado nos volumes — **sem DB**.
 
-**Storage** — single-disk ou erasure (1+ sets num pool); reconstrução na
-leitura + `heal` sob demanda; bitrot HighwayHash.
+**Versioning & WORM** — versões reais, `?versionId`, delete markers,
+`ListObjectVersions`. Object Lock GOVERNANCE/COMPLIANCE + legal hold por
+versão, com enforcement no delete. *Backend single-disk.*
 
-**Extras** — notificações via webhook; CORS; console web embutido.
+**Criptografia** — SSE-S3: `x-amz-server-side-encryption: AES256` no PUT →
+AES-256-GCM em chunks, DEK envelopada pela master key local. GET/HEAD/Range
+transparentes. *Backend single-disk.*
+
+**Storage** — single-disk (`internal/object/fs`) ou erasure (1+ sets num
+pool, `internal/erasure`); reconstrução na leitura + `heal` sob demanda;
+bitrot HighwayHash por stripe.
+
+**Automação** — scanner de background (ILM: expiração de objetos/versões,
+abort de multipart velho); replicação async (local ou S3 remoto);
+notificações via webhook.
+
+**Console** — SPA embutida, servida pela própria API.
 
 ## O que **não** funciona ainda
 
-- **Cluster multi-nó** (M6) — hoje é single-node (1+ discos locais). Precisa
-  de RPC entre nós + lock distribuído.
-- **Versioning real e Object Lock / WORM** (M10) — endpoints de versioning
-  são *accept-and-ignore*; toda operação é sobre a versão corrente.
-- **SSE / KMS** (M11) — sem criptografia em repouso.
-- **Replicação de bucket** (M13).
-- **Scanner de background** (M7) — o heal é sob demanda (`POST .../heal`).
-- Grupos IAM, `AssumeRoleWithWebIdentity` (OIDC/LDAP), lifecycle/ILM.
+- **Cluster multi-nó** (M6) — hoje é single-node (1+ discos locais no mesmo
+  host). Precisa de RPC entre nós + lock distribuído.
+- **Paridade do backend erasure** — versioning, Object Lock e SSE hoje só
+  existem no backend single-disk; no erasure o bucket é sempre unversioned
+  e sem criptografia.
+- **SSE-KMS / SSE-C** (só SSE-S3), KMS externo.
+- **Grupos IAM**, `AssumeRoleWithWebIdentity` (OIDC/LDAP).
+- Lifecycle: transições de storage class (só expiração).
+- Replicação: sem fila de retry persistente (best-effort, 3 tentativas).
+- Heal proativo de background (o scanner só faz ILM).
 
 ## Formato on-disk
 
