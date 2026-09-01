@@ -309,6 +309,65 @@ func TestBucketPolicyPublicRead(t *testing.T) {
 	}
 }
 
+func TestBucketVersioningHTTP(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.Close()
+	do(t, srv, http.MethodPut, "/vbk", []byte{}, nil).Body.Close()
+
+	// enable versioning
+	vc := `<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status></VersioningConfiguration>`
+	if r := do(t, srv, http.MethodPut, "/vbk?versioning", []byte(vc), nil); r.StatusCode/100 != 2 {
+		t.Fatalf("put versioning: %d %s", r.StatusCode, readBody(t, r))
+	}
+	g := do(t, srv, http.MethodGet, "/vbk?versioning", nil, nil)
+	if !strings.Contains(readBody(t, g), "<Status>Enabled</Status>") {
+		t.Fatal("get versioning did not report Enabled")
+	}
+
+	r1 := do(t, srv, http.MethodPut, "/vbk/f.txt", []byte("one"), nil)
+	v1 := r1.Header.Get("x-amz-version-id")
+	r1.Body.Close()
+	r2 := do(t, srv, http.MethodPut, "/vbk/f.txt", []byte("two"), nil)
+	v2 := r2.Header.Get("x-amz-version-id")
+	r2.Body.Close()
+	if v1 == "" || v2 == "" || v1 == v2 {
+		t.Fatalf("version ids: %q %q", v1, v2)
+	}
+
+	if b := readBody(t, do(t, srv, http.MethodGet, "/vbk/f.txt", nil, nil)); b != "two" {
+		t.Fatalf("latest GET = %q", b)
+	}
+	if b := readBody(t, do(t, srv, http.MethodGet, "/vbk/f.txt?versionId="+v1, nil, nil)); b != "one" {
+		t.Fatalf("versioned GET = %q", b)
+	}
+
+	lv := readBody(t, do(t, srv, http.MethodGet, "/vbk?versions", nil, nil))
+	if strings.Count(lv, "<Version>") != 2 {
+		t.Fatalf("ListObjectVersions: %s", lv)
+	}
+
+	// delete marker
+	dr := do(t, srv, http.MethodDelete, "/vbk/f.txt", nil, nil)
+	if dr.Header.Get("x-amz-delete-marker") != "true" || dr.StatusCode != 204 {
+		t.Fatalf("delete marker resp: %d %v", dr.StatusCode, dr.Header)
+	}
+	if g := do(t, srv, http.MethodGet, "/vbk/f.txt", nil, nil); g.StatusCode != 404 {
+		t.Fatalf("GET after delete marker: want 404, got %d", g.StatusCode)
+	}
+	lv = readBody(t, do(t, srv, http.MethodGet, "/vbk?versions", nil, nil))
+	if strings.Count(lv, "<DeleteMarker>") != 1 {
+		t.Fatalf("expected 1 DeleteMarker: %s", lv)
+	}
+	// permanent delete of a specific version
+	if r := do(t, srv, http.MethodDelete, "/vbk/f.txt?versionId="+v1, nil, nil); r.StatusCode != 204 {
+		t.Fatalf("versioned delete: %d", r.StatusCode)
+	}
+	lv = readBody(t, do(t, srv, http.MethodGet, "/vbk?versions", nil, nil))
+	if strings.Count(lv, "<Version>") != 1 {
+		t.Fatalf("after permanent delete want 1 Version: %s", lv)
+	}
+}
+
 func TestObjectTagging(t *testing.T) {
 	srv := newTestServer(t)
 	defer srv.Close()

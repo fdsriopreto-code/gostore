@@ -17,6 +17,8 @@ type Config struct {
 	CORS         []CORSRule        `json:"cors,omitempty"`
 	Tags         map[string]string `json:"tags,omitempty"`
 	Notification *Notification     `json:"notification,omitempty"`
+	// Versioning is "", "Enabled" or "Suspended" (S3 VersioningConfiguration).
+	Versioning string `json:"versioning,omitempty"`
 }
 
 // CORSRule mirrors an S3 CORS rule.

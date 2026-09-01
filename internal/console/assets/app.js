@@ -414,9 +414,9 @@ async function doUpload(files) {
   setTimeout(render, 400);
 }
 
-async function downloadObject(b, key) {
+async function downloadObject(b, key, query) {
   try {
-    const r = await must(await api("GET", "/" + b + "/" + key));
+    const r = await must(await api("GET", "/" + b + "/" + key, { query: query || {} }));
     const blob = await r.blob();
     const a = el("a", { href: URL.createObjectURL(blob), download: key.split("/").pop() });
     document.body.append(a); a.click(); a.remove();
@@ -461,6 +461,35 @@ async function objectDrawer(b, o) {
       c.append(el("div", { class: "field" }, out,
         el("button", { class: "ghost sm", style: "margin-top:6px", onclick: () => copyText(out.value) }, ic(ICON.copy, 1.8), "Copy")));
     });
+    tab("versions", "Versions", async (c) => {
+      c.append(el("div", { class: "empty" }, el("span", { class: "spin" })));
+      try {
+        const doc = parseXml(await (await api("GET", "/" + b, { query: { versions: "", prefix: o.key } })).text());
+        const rows = [];
+        for (const v of doc.getElementsByTagName("Version"))
+          rows.push({ id: v.getElementsByTagName("VersionId")[0].textContent, latest: v.getElementsByTagName("IsLatest")[0]?.textContent === "true", size: v.getElementsByTagName("Size")[0]?.textContent, lm: v.getElementsByTagName("LastModified")[0]?.textContent, dm: false });
+        for (const v of doc.getElementsByTagName("DeleteMarker"))
+          rows.push({ id: v.getElementsByTagName("VersionId")[0].textContent, latest: v.getElementsByTagName("IsLatest")[0]?.textContent === "true", lm: v.getElementsByTagName("LastModified")[0]?.textContent, dm: true });
+        c.innerHTML = "";
+        if (!rows.length) { c.append(el("div", { class: "muted" }, "This bucket is not versioned, or the key has no versions.")); return; }
+        for (const v of rows) {
+          const row = el("div", { class: "kv", style: "grid-template-columns:1fr auto;align-items:center" },
+            el("div", {},
+              el("code", {}, v.id),
+              v.latest ? el("span", { class: "pill ok", style: "margin-left:6px" }, "latest") : null,
+              v.dm ? el("span", { class: "pill", style: "margin-left:6px" }, "delete marker") : null,
+              el("div", { class: "muted", style: "font-size:12px" }, fmtDate(v.lm) + (v.size ? " · " + fmtSize(v.size) : ""))),
+            el("div", {},
+              v.dm ? null : el("button", { class: "ghost sm", onclick: () => downloadObject(b, o.key, { versionId: v.id }) }, ic(ICON.down, 1.8)),
+              el("button", { class: "danger sm", onclick: async () => {
+                if (!confirm("Permanently delete this version?")) return;
+                try { await must(await api("DELETE", "/" + b + "/" + o.key, { query: { versionId: v.id } })); toast("Version deleted", "ok"); }
+                catch (e) { toast(e.message, "err"); }
+              } }, ic(ICON.trash, 1.8))));
+          c.append(row);
+        }
+      } catch (e) { c.innerHTML = ""; c.append(el("div", { class: "muted" }, e.message)); }
+    });
     tab("tags", "Tags", async (c) => {
       c.append(el("div", { class: "empty" }, el("span", { class: "spin" })));
       try {
@@ -488,6 +517,27 @@ async function bucketSettings(b) {
   const wrap = el("div");
   main().append(wrap);
   const sec = (title, node) => { wrap.append(el("h3", { style: "margin:22px 0 8px;font-size:15px" }, title)); wrap.append(node); };
+
+  // versioning
+  let vstat = "";
+  try {
+    const d = parseXml(await (await api("GET", "/" + b, { query: { versioning: "" } })).text());
+    vstat = d.getElementsByTagName("Status")[0]?.textContent || "";
+  } catch {}
+  const vsel = el("select"); for (const o of [["Off", ""], ["Enabled", "Enabled"], ["Suspended", "Suspended"]]) vsel.append(el("option", { value: o[1] }, o[0]));
+  vsel.value = vstat;
+  sec("Versioning", el("div", { style: "display:flex;gap:8px;align-items:center;max-width:340px" },
+    vsel,
+    el("button", {
+      class: "primary sm", onclick: async () => {
+        if (!vsel.value) { toast("S3 cannot turn versioning fully off once enabled — use Suspended.", "err"); return; }
+        try {
+          await must(await api("PUT", "/" + b, { query: { versioning: "" }, contentType: "application/xml",
+            body: `<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>${vsel.value}</Status></VersioningConfiguration>` }));
+          toast("Versioning: " + vsel.value, "ok");
+        } catch (e) { toast(e.message, "err"); }
+      },
+    }, "Apply")));
 
   // policy
   let polDoc = "";

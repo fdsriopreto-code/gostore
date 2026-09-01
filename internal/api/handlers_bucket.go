@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/lojadopocket/gostore/internal/bucketcfg"
 	"github.com/lojadopocket/gostore/internal/object"
 )
 
@@ -72,17 +73,44 @@ func (s *Server) handleGetBucketLocation(w http.ResponseWriter, r *http.Request,
 	writeXML(w, http.StatusOK, locationConstraint{XMLNS: s3XMLNS, Location: loc})
 }
 
+type versioningConfiguration struct {
+	XMLName xml.Name `xml:"VersioningConfiguration"`
+	XMLNS   string   `xml:"xmlns,attr"`
+	Status  string   `xml:"Status,omitempty"`
+}
+
 func (s *Server) handleGetBucketVersioning(w http.ResponseWriter, r *http.Request, bucket string) {
 	if _, err := s.obj.GetBucketInfo(r.Context(), bucket); err != nil {
 		writeErrorResponse(w, r, toAPIError(err), "/"+bucket)
 		return
 	}
-	type versioningConfiguration struct {
-		XMLName xml.Name `xml:"VersioningConfiguration"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Status  string   `xml:"Status,omitempty"`
+	st := ""
+	if s.bcfg != nil {
+		st = s.bcfg.Get(bucket).Versioning
 	}
-	writeXML(w, http.StatusOK, versioningConfiguration{XMLNS: s3XMLNS})
+	writeXML(w, http.StatusOK, versioningConfiguration{XMLNS: s3XMLNS, Status: st})
+}
+
+func (s *Server) handlePutBucketVersioning(w http.ResponseWriter, r *http.Request, bucket string) {
+	if _, err := s.obj.GetBucketInfo(r.Context(), bucket); err != nil {
+		writeErrorResponse(w, r, toAPIError(err), "/"+bucket)
+		return
+	}
+	b, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+	var vc versioningConfiguration
+	if err := xml.Unmarshal(b, &vc); err != nil {
+		writeErrorResponse(w, r, ErrMalformedXML, "/"+bucket)
+		return
+	}
+	if vc.Status != "Enabled" && vc.Status != "Suspended" {
+		writeErrorResponse(w, r, ErrInvalidArgument, "/"+bucket)
+		return
+	}
+	if err := s.bcfg.Update(bucket, func(c *bucketcfg.Config) { c.Versioning = vc.Status }); err != nil {
+		writeErrorResponse(w, r, ErrInternalError, "/"+bucket)
+		return
+	}
+	writeSuccessOK(w)
 }
 
 func (s *Server) handleListObjectsV1(w http.ResponseWriter, r *http.Request, bucket string) {
@@ -167,6 +195,13 @@ func (s *Server) handleListObjectVersions(w http.ResponseWriter, r *http.Request
 		Size         int64    `xml:"Size"`
 		StorageClass string   `xml:"StorageClass"`
 	}
+	type deleteMarkerXML struct {
+		XMLName      xml.Name `xml:"DeleteMarker"`
+		Key          string   `xml:"Key"`
+		VersionID    string   `xml:"VersionId"`
+		IsLatest     bool     `xml:"IsLatest"`
+		LastModified string   `xml:"LastModified"`
+	}
 	type listVersionsResult struct {
 		XMLName        xml.Name `xml:"ListVersionsResult"`
 		XMLNS          string   `xml:"xmlns,attr"`
@@ -177,6 +212,7 @@ func (s *Server) handleListObjectVersions(w http.ResponseWriter, r *http.Request
 		Delimiter      string   `xml:"Delimiter,omitempty"`
 		IsTruncated    bool     `xml:"IsTruncated"`
 		Versions       []versionXML
+		DeleteMarkers  []deleteMarkerXML
 		CommonPrefixes []commonPrefixXML
 	}
 	res := listVersionsResult{
@@ -184,8 +220,18 @@ func (s *Server) handleListObjectVersions(w http.ResponseWriter, r *http.Request
 		MaxKeys: maxKeys, Delimiter: delim, IsTruncated: li.IsTruncated,
 	}
 	for _, o := range li.Objects {
+		vid := o.VersionID
+		if vid == "" {
+			vid = "null"
+		}
+		if o.DeleteMarker {
+			res.DeleteMarkers = append(res.DeleteMarkers, deleteMarkerXML{
+				Key: o.Name, VersionID: vid, IsLatest: o.IsLatest, LastModified: amzTime(o.ModTime),
+			})
+			continue
+		}
 		res.Versions = append(res.Versions, versionXML{
-			Key: o.Name, VersionID: "null", IsLatest: true,
+			Key: o.Name, VersionID: vid, IsLatest: o.IsLatest,
 			LastModified: amzTime(o.ModTime), ETag: quoteETag(o.ETag),
 			Size: o.Size, StorageClass: "STANDARD",
 		})

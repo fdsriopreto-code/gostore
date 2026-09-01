@@ -26,7 +26,8 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, bucket,
 		return
 	}
 
-	opts := object.ObjectOptions{UserDefined: extractMetadata(r)}
+	opts := s.vopts(bucket, r)
+	opts.UserDefined = extractMetadata(r)
 	if v := r.Header.Get("x-amz-tagging"); v != "" {
 		opts.UserTags = v
 	}
@@ -41,6 +42,9 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, bucket,
 		return
 	}
 	w.Header().Set("ETag", quoteETag(oi.ETag))
+	if oi.VersionID != "" {
+		w.Header().Set("x-amz-version-id", oi.VersionID)
+	}
 	s.notify(r, event.ObjectCreated, bucket, key, oi.Size, oi.ETag)
 	writeSuccessOK(w)
 }
@@ -55,10 +59,17 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, bucket
 
 func (s *Server) getOrHeadObject(w http.ResponseWriter, r *http.Request, bucket, key string, withBody bool) {
 	res := "/" + bucket + "/" + key
-	oi, err := s.obj.GetObjectInfo(r.Context(), bucket, key, object.ObjectOptions{})
+	gopts := s.vopts(bucket, r)
+	oi, err := s.obj.GetObjectInfo(r.Context(), bucket, key, gopts)
 	if err != nil {
+		if oi.DeleteMarker {
+			w.Header().Set("x-amz-delete-marker", "true")
+		}
 		writeErrorResponse(w, r, toAPIError(err), res)
 		return
+	}
+	if oi.VersionID != "" {
+		w.Header().Set("x-amz-version-id", oi.VersionID)
 	}
 
 	switch condStatus := evalGetConditionals(r, oi); condStatus {
@@ -90,7 +101,7 @@ func (s *Server) getOrHeadObject(w http.ResponseWriter, r *http.Request, bucket,
 		return
 	}
 
-	gr, err := s.obj.GetObjectNInfo(r.Context(), bucket, key, rng, r.Header, object.ObjectOptions{})
+	gr, err := s.obj.GetObjectNInfo(r.Context(), bucket, key, rng, r.Header, gopts)
 	if err != nil {
 		writeErrorResponse(w, r, toAPIError(err), res)
 		return
@@ -111,11 +122,18 @@ func (s *Server) getOrHeadObject(w http.ResponseWriter, r *http.Request, bucket,
 }
 
 func (s *Server) handleDeleteObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
-	if _, err := s.obj.DeleteObject(r.Context(), bucket, key, object.ObjectOptions{}); err != nil {
+	di, err := s.obj.DeleteObject(r.Context(), bucket, key, s.vopts(bucket, r))
+	if err != nil {
 		if ec := toAPIError(err); ec != ErrNoSuchKey { // delete is idempotent
 			writeErrorResponse(w, r, ec, "/"+bucket+"/"+key)
 			return
 		}
+	}
+	if di.VersionID != "" {
+		w.Header().Set("x-amz-version-id", di.VersionID)
+	}
+	if di.DeleteMarker {
+		w.Header().Set("x-amz-delete-marker", "true")
 	}
 	s.notify(r, event.ObjectRemoved, bucket, key, 0, "")
 	writeSuccessNoContent(w)
@@ -199,6 +217,21 @@ func writeObjectHeaders(w http.ResponseWriter, oi object.ObjectInfo, region stri
 		}
 		h.Set("x-amz-tagging-count", strconv.Itoa(n))
 	}
+}
+
+// vopts builds ObjectOptions carrying the bucket's versioning state and any
+// ?versionId from the request.
+func (s *Server) vopts(bucket string, r *http.Request) object.ObjectOptions {
+	o := object.ObjectOptions{VersionID: r.URL.Query().Get("versionId")}
+	if s.bcfg != nil {
+		switch s.bcfg.Get(bucket).Versioning {
+		case "Enabled":
+			o.Versioned = true
+		case "Suspended":
+			o.VersionSuspended = true
+		}
+	}
+	return o
 }
 
 // bodySize returns the number of raw object bytes to expect. For aws-chunked

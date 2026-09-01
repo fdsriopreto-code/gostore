@@ -31,7 +31,10 @@ func (f *FS) ensureBucket(bucket string) error {
 }
 
 // PutObject stores a full object in one request.
-func (f *FS) PutObject(_ context.Context, bucket, obj string, data *object.PutObjReader, opts object.ObjectOptions) (object.ObjectInfo, error) {
+func (f *FS) PutObject(ctx context.Context, bucket, obj string, data *object.PutObjReader, opts object.ObjectOptions) (object.ObjectInfo, error) {
+	if opts.Versioned || opts.VersionSuspended {
+		return f.putVersion(ctx, bucket, obj, data, opts)
+	}
 	if err := f.ensureBucket(bucket); err != nil {
 		return object.ObjectInfo{}, err
 	}
@@ -151,13 +154,20 @@ func (f *FS) getInfoUnlocked(bucket, obj string) (object.ObjectInfo, error) {
 	return m.toObjectInfo(bucket, obj), nil
 }
 
-func (f *FS) GetObjectInfo(_ context.Context, bucket, obj string, _ object.ObjectOptions) (object.ObjectInfo, error) {
+func (f *FS) GetObjectInfo(_ context.Context, bucket, obj string, opts object.ObjectOptions) (object.ObjectInfo, error) {
 	if err := f.ensureBucket(bucket); err != nil {
 		return object.ObjectInfo{}, err
 	}
 	lk := f.NewNSLock(bucket, obj)
 	ctx2, _ := lk.GetRLock(context.Background(), 0)
 	defer lk.RUnlock(ctx2)
+	if opts.Versioned || opts.VersionSuspended || opts.VersionID != "" {
+		oi, _, err := f.getVersionInfo(bucket, obj, opts.VersionID)
+		if err == nil || !errors.Is(err, object.ErrObjectNotFound) {
+			return oi, err
+		}
+		// fall through to plain lookup for un-migrated keys
+	}
 	return f.getInfoUnlocked(bucket, obj)
 }
 
@@ -168,7 +178,19 @@ func (f *FS) GetObjectNInfo(_ context.Context, bucket, obj string, rs *object.HT
 	lk := f.NewNSLock(bucket, obj)
 	ctx2, _ := lk.GetRLock(context.Background(), 0)
 
-	oi, err := f.getInfoUnlocked(bucket, obj)
+	var oi object.ObjectInfo
+	var ent verEntry
+	var err error
+	versioned := opts.Versioned || opts.VersionSuspended || opts.VersionID != ""
+	if versioned {
+		oi, ent, err = f.getVersionInfo(bucket, obj, opts.VersionID)
+		if errors.Is(err, object.ErrObjectNotFound) {
+			oi, err = f.getInfoUnlocked(bucket, obj) // un-migrated key
+			versioned = false
+		}
+	} else {
+		oi, err = f.getInfoUnlocked(bucket, obj)
+	}
 	if err != nil {
 		lk.RUnlock(ctx2)
 		return nil, err
@@ -178,7 +200,12 @@ func (f *FS) GetObjectNInfo(_ context.Context, bucket, obj string, rs *object.HT
 		return nil, object.ErrPreconditionFailed
 	}
 
-	fh, err := os.Open(f.objDataPath(bucket, obj))
+	var fh *os.File
+	if versioned {
+		fh, err = f.openVersionData(bucket, obj, opts.VersionID, ent)
+	} else {
+		fh, err = os.Open(f.objDataPath(bucket, obj))
+	}
 	if err != nil {
 		lk.RUnlock(ctx2)
 		return nil, err
@@ -260,9 +287,12 @@ func (r *fileReader) Close() error {
 	return err
 }
 
-func (f *FS) DeleteObject(_ context.Context, bucket, obj string, _ object.ObjectOptions) (object.ObjectInfo, error) {
+func (f *FS) DeleteObject(ctx context.Context, bucket, obj string, opts object.ObjectOptions) (object.ObjectInfo, error) {
 	if err := f.ensureBucket(bucket); err != nil {
 		return object.ObjectInfo{}, err
+	}
+	if opts.Versioned || opts.VersionSuspended || opts.VersionID != "" {
+		return f.deleteVersion(ctx, bucket, obj, opts.VersionID, opts.VersionSuspended)
 	}
 	lk := f.NewNSLock(bucket, obj)
 	ctx2, _ := lk.GetLock(context.Background(), 0)

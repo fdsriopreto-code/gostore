@@ -176,8 +176,10 @@ func (s *Server) dispatchBucket(w http.ResponseWriter, r *http.Request, bucket s
 			s.handlePutBucketCORS(w, r, bucket)
 		case has("notification"):
 			s.handlePutBucketNotification(w, r, bucket)
-		case has("versioning") || has("acl") || has("lifecycle") || has("object-lock"):
-			writeSuccessOK(w) // accept-and-ignore (deep versioning/WORM: deferred)
+		case has("versioning"):
+			s.handlePutBucketVersioning(w, r, bucket)
+		case has("acl") || has("lifecycle") || has("object-lock"):
+			writeSuccessOK(w) // accept-and-ignore
 		default:
 			s.handleCreateBucket(w, r, bucket)
 		}

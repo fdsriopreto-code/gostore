@@ -57,6 +57,13 @@ type listPage struct {
 	nextMarker  string
 }
 
+// bucketHasVersions reports whether the bucket has a non-empty version store,
+// in which case listings must come from the version log.
+func (f *FS) bucketHasVersions(bucket string) bool {
+	ents, err := os.ReadDir(filepath.Join(f.root, sysDir, "objver", bucket))
+	return err == nil && len(ents) > 0
+}
+
 func (f *FS) doList(bucket string, p listParams) (listPage, error) {
 	if err := f.ensureBucket(bucket); err != nil {
 		return listPage{}, err
@@ -67,6 +74,25 @@ func (f *FS) doList(bucket string, p listParams) (listPage, error) {
 	if p.maxKeys > 1000 {
 		p.maxKeys = 1000
 	}
+
+	if f.bucketHasVersions(bucket) {
+		lv, err := f.listVersioned(bucket, p.prefix, p.delimiter, p.maxKeys, true)
+		if err != nil {
+			return listPage{}, err
+		}
+		var page listPage
+		page.isTruncated = lv.IsTruncated
+		page.prefixes = lv.Prefixes
+		for _, o := range lv.Objects {
+			if p.startAfter != "" && o.Name <= p.startAfter {
+				continue
+			}
+			page.objects = append(page.objects, o)
+			page.nextMarker = o.Name
+		}
+		return page, nil
+	}
+
 	keys, err := f.walkKeys(bucket)
 	if err != nil {
 		return listPage{}, err
@@ -191,9 +217,12 @@ func (f *FS) ListObjectsV2(_ context.Context, bucket, prefix, continuationToken,
 	return out, nil
 }
 
-func (f *FS) ListObjectVersions(ctx context.Context, bucket, prefix, marker, versionMarker, delimiter string, maxKeys int) (object.ListObjectVersionsInfo, error) {
-	// M1 has no versioning: report the current objects as their sole "null" version.
-	li, err := f.ListObjects(ctx, bucket, prefix, marker, delimiter, maxKeys)
+func (f *FS) ListObjectVersions(_ context.Context, bucket, prefix, marker, versionMarker, delimiter string, maxKeys int) (object.ListObjectVersionsInfo, error) {
+	if f.bucketHasVersions(bucket) {
+		return f.listVersioned(bucket, prefix, delimiter, maxKeys, false)
+	}
+	// Unversioned bucket: every object is its sole "null" version.
+	li, err := f.ListObjects(context.Background(), bucket, prefix, marker, delimiter, maxKeys)
 	if err != nil {
 		return object.ListObjectVersionsInfo{}, err
 	}
@@ -202,9 +231,7 @@ func (f *FS) ListObjectVersions(ctx context.Context, bucket, prefix, marker, ver
 		li.Objects[i].IsLatest = true
 	}
 	return object.ListObjectVersionsInfo{
-		IsTruncated: li.IsTruncated,
-		NextMarker:  li.NextMarker,
-		Objects:     li.Objects,
-		Prefixes:    li.Prefixes,
+		IsTruncated: li.IsTruncated, NextMarker: li.NextMarker,
+		Objects: li.Objects, Prefixes: li.Prefixes,
 	}, nil
 }
