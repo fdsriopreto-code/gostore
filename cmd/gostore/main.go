@@ -303,15 +303,15 @@ func consolePlaceholder(cfg config.Config) http.Handler {
 <tr><td style="padding:.2rem 1rem .2rem 0;color:#666">Mode</td><td><code>%s</code></td></tr>
 </table>
 <p style="margin-top:1.5rem">Status page only. Point your reverse proxy / PaaS at the
-<strong>S3 API port (%s)</strong> &mdash; that port also serves the health and
-self-test endpoints:</p>
+<strong>S3 API port (%s)</strong> &mdash; that port serves the S3 API, the
+web console, and the health endpoints:</p>
 <ul>
-<li><code>GET /gostore/health/live</code></li>
-<li><code>GET /gostore/health/ready</code></li>
+<li><strong>Web console:</strong> <code>&lt;api-host&gt;/gostore/console/</code></li>
+<li><code>GET /gostore/health/live</code> &nbsp;/&nbsp; <code>/gostore/health/ready</code></li>
 <li><code>GET /gostore/health/selftest</code> &mdash; full write/read/verify/delete round-trip</li>
 </ul>
-<p>The S3 API itself requires AWS Signature V4 &mdash; use <code>mc</code>, the AWS
-CLI/SDKs, or any S3 client (path-style). A full web console is milestone M14.</p>
+<p>The S3 API requires AWS Signature V4 &mdash; use the console, <code>mc</code>, the
+AWS CLI/SDKs, or any S3 client (path-style).</p>
 </body>`, version, cfg.Address, cfg.ConsoleAddress, cfg.Region, modeString(cfg), cfg.Address)
 	})
 }

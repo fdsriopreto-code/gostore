@@ -113,10 +113,10 @@ func (b *Bus) deliver(wh bucketcfg.WebhookTarget, e Event) {
 		"EventName": string(e.Kind),
 		"Key":       e.Bucket + "/" + e.Key,
 		"Records": []map[string]any{{
-			"eventVersion": "2.1",
-			"eventSource":  "gostore:s3",
-			"eventTime":    e.Time.Format(time.RFC3339),
-			"eventName":    string(e.Kind),
+			"eventVersion":      "2.1",
+			"eventSource":       "gostore:s3",
+			"eventTime":         e.Time.Format(time.RFC3339),
+			"eventName":         string(e.Kind),
 			"requestParameters": map[string]string{"sourceIPAddress": e.SourceIP},
 			"s3": map[string]any{
 				"bucket": map[string]any{"name": e.Bucket},

@@ -9,6 +9,7 @@ import (
 
 	"github.com/lojadopocket/gostore/internal/bucketcfg"
 	"github.com/lojadopocket/gostore/internal/config"
+	"github.com/lojadopocket/gostore/internal/console"
 	"github.com/lojadopocket/gostore/internal/event"
 	"github.com/lojadopocket/gostore/internal/iam"
 	"github.com/lojadopocket/gostore/internal/object"
@@ -44,6 +45,10 @@ func NewServer(cfg config.Config, obj object.Layer, im *iam.Manager, bc *bucketc
 	mux.HandleFunc("GET /gostore/health/cluster", s.handleHealthReady)
 	mux.HandleFunc("GET /gostore/health/selftest", s.handleSelfTest)
 	mux.Handle("/gostore/admin/v1/", http.HandlerFunc(s.handleAdmin))
+	mux.Handle("/gostore/console/", http.StripPrefix("/gostore/console", console.Handler()))
+	mux.HandleFunc("/gostore/console", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/gostore/console/", http.StatusFound)
+	})
 	mux.Handle("/", http.HandlerFunc(s.handleS3))
 
 	return chain(mux,

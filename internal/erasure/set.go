@@ -40,8 +40,8 @@ func NewSet(disks []Disk) (*Set, error) {
 	return &Set{disks: disks, ec: ec, dataBlocks: n - parity, parityBlocks: parity}, nil
 }
 
-func (s *Set) n() int           { return len(s.disks) }
-func (s *Set) readQuorum() int  { return s.dataBlocks }
+func (s *Set) n() int          { return len(s.disks) }
+func (s *Set) readQuorum() int { return s.dataBlocks }
 func (s *Set) writeQuorum() int { // dataBlocks+1, but never more than n
 	if s.dataBlocks+1 > s.n() {
 		return s.n()
@@ -50,8 +50,8 @@ func (s *Set) writeQuorum() int { // dataBlocks+1, but never more than n
 }
 
 const (
-	metaFile   = "xl.meta"
-	tmpPrefix  = ".gostore.sys/tmp"
+	metaFile    = "xl.meta"
+	tmpPrefix   = ".gostore.sys/tmp"
 	mpartPrefix = ".gostore.sys/multipart"
 )
 

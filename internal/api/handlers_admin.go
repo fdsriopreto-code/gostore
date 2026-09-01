@@ -97,15 +97,15 @@ func (s *Server) adminInfo(w http.ResponseWriter, r *http.Request) {
 		free += d.FreeSpace
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version":      "gostore",
-		"mode":         backendMode(si.Backend.Type),
-		"region":       s.cfg.Region,
-		"drives":       len(si.Disks),
-		"totalSpace":   total,
-		"freeSpace":    free,
-		"parity":       si.Backend.StandardSCParity,
-		"users":        len(s.iam.ListUsers()),
-		"policies":     len(s.iam.ListPolicies()),
+		"version":    "gostore",
+		"mode":       backendMode(si.Backend.Type),
+		"region":     s.cfg.Region,
+		"drives":     len(si.Disks),
+		"totalSpace": total,
+		"freeSpace":  free,
+		"parity":     si.Backend.StandardSCParity,
+		"users":      len(s.iam.ListUsers()),
+		"policies":   len(s.iam.ListPolicies()),
 	})
 }
 

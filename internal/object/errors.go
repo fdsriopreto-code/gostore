@@ -11,28 +11,28 @@ import (
 var (
 	ErrNotImplemented = errors.New("object: not implemented in this milestone")
 
-	ErrBucketNotFound      = errors.New("object: bucket not found")
-	ErrBucketExists        = errors.New("object: bucket already exists")
-	ErrBucketNotEmpty      = errors.New("object: bucket not empty")
-	ErrBucketNameInvalid   = errors.New("object: invalid bucket name")
+	ErrBucketNotFound    = errors.New("object: bucket not found")
+	ErrBucketExists      = errors.New("object: bucket already exists")
+	ErrBucketNotEmpty    = errors.New("object: bucket not empty")
+	ErrBucketNameInvalid = errors.New("object: invalid bucket name")
 
-	ErrObjectNotFound      = errors.New("object: object not found")
-	ErrObjectNameInvalid   = errors.New("object: invalid object name")
-	ErrObjectExistsAsDir   = errors.New("object: object name already exists as a directory prefix")
-	ErrPreconditionFailed  = errors.New("object: precondition failed")
-	ErrInvalidRange        = errors.New("object: invalid range")
-	ErrIncompleteBody      = errors.New("object: fewer bytes than declared Content-Length")
-	ErrEntityTooLarge      = errors.New("object: object exceeds the maximum allowed size")
+	ErrObjectNotFound     = errors.New("object: object not found")
+	ErrObjectNameInvalid  = errors.New("object: invalid object name")
+	ErrObjectExistsAsDir  = errors.New("object: object name already exists as a directory prefix")
+	ErrPreconditionFailed = errors.New("object: precondition failed")
+	ErrInvalidRange       = errors.New("object: invalid range")
+	ErrIncompleteBody     = errors.New("object: fewer bytes than declared Content-Length")
+	ErrEntityTooLarge     = errors.New("object: object exceeds the maximum allowed size")
 
-	ErrInvalidUploadID     = errors.New("object: invalid or unknown upload id")
-	ErrInvalidPart         = errors.New("object: one or more parts are invalid")
-	ErrPartTooSmall        = errors.New("object: part smaller than the minimum allowed size")
-	ErrInvalidPartOrder    = errors.New("object: parts not in ascending order")
+	ErrInvalidUploadID  = errors.New("object: invalid or unknown upload id")
+	ErrInvalidPart      = errors.New("object: one or more parts are invalid")
+	ErrPartTooSmall     = errors.New("object: part smaller than the minimum allowed size")
+	ErrInvalidPartOrder = errors.New("object: parts not in ascending order")
 
-	ErrStorageFull         = errors.New("object: storage backend is full")
-	ErrReadQuorum          = errors.New("object: not enough healthy disks for read quorum")
-	ErrWriteQuorum         = errors.New("object: not enough healthy disks for write quorum")
-	ErrCorruptedData       = errors.New("object: data failed integrity check (bitrot)")
+	ErrStorageFull   = errors.New("object: storage backend is full")
+	ErrReadQuorum    = errors.New("object: not enough healthy disks for read quorum")
+	ErrWriteQuorum   = errors.New("object: not enough healthy disks for write quorum")
+	ErrCorruptedData = errors.New("object: data failed integrity check (bitrot)")
 )
 
 // BucketNotFound et al. are typed wrappers so handlers can attach the offending
@@ -52,5 +52,7 @@ func (e ObjectNotFound) Unwrap() error { return ErrObjectNotFound }
 
 type BucketExists struct{ Bucket string }
 
-func (e BucketExists) Error() string { return fmt.Sprintf("object: bucket %q already exists", e.Bucket) }
+func (e BucketExists) Error() string {
+	return fmt.Sprintf("object: bucket %q already exists", e.Bucket)
+}
 func (e BucketExists) Unwrap() error { return ErrBucketExists }

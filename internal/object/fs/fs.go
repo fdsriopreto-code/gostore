@@ -32,10 +32,10 @@ import (
 )
 
 const (
-	sysDir     = ".gostore.sys"
-	formatFile = "format.json"
+	sysDir        = ".gostore.sys"
+	formatFile    = "format.json"
 	formatVersion = 1
-	minPartSize = 5 * 1024 * 1024 // 5 MiB, matches S3's minimum non-final part
+	minPartSize   = 5 * 1024 * 1024 // 5 MiB, matches S3's minimum non-final part
 )
 
 // FS is a single-disk object.Layer.

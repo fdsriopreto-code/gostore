@@ -15,8 +15,8 @@ type BucketInfo struct {
 	Created time.Time
 
 	// Set once the corresponding features land (M10).
-	Versioning     bool
-	ObjectLocking  bool
+	Versioning    bool
+	ObjectLocking bool
 }
 
 // MakeBucketOptions carries options for MakeBucket.
@@ -47,17 +47,17 @@ type ObjectInfo struct {
 	Bucket string
 	Name   string
 
-	Size        int64
-	IsDir       bool
-	ModTime     time.Time
-	ETag        string
-	ContentType string
+	Size            int64
+	IsDir           bool
+	ModTime         time.Time
+	ETag            string
+	ContentType     string
 	ContentEncoding string
 
 	// Versioning (M10).
-	VersionID      string
-	IsLatest       bool
-	DeleteMarker   bool
+	VersionID    string
+	IsLatest     bool
+	DeleteMarker bool
 
 	// StorageClass, e.g. "STANDARD" or "REDUCED_REDUNDANCY".
 	StorageClass string
@@ -84,8 +84,8 @@ type ObjectInfo struct {
 // ObjectPartInfo describes one part of a multipart object as persisted.
 type ObjectPartInfo struct {
 	Number     int
-	Size       int64          // decrypted/plain size
-	ActualSize int64          // size on disk (may differ with compression/SSE)
+	Size       int64 // decrypted/plain size
+	ActualSize int64 // size on disk (may differ with compression/SSE)
 	ETag       string
 	ModTime    time.Time
 }
@@ -195,15 +195,15 @@ type PartInfo struct {
 
 // ListPartsInfo is the result of ListObjectParts.
 type ListPartsInfo struct {
-	Bucket           string
-	Object           string
-	UploadID         string
-	PartNumberMarker int
+	Bucket               string
+	Object               string
+	UploadID             string
+	PartNumberMarker     int
 	NextPartNumberMarker int
-	MaxParts         int
-	IsTruncated      bool
-	Parts            []PartInfo
-	UserDefined      map[string]string
+	MaxParts             int
+	IsTruncated          bool
+	Parts                []PartInfo
+	UserDefined          map[string]string
 }
 
 // ListMultipartsInfo is the result of ListMultipartUploads.
@@ -266,7 +266,7 @@ type StorageInfo struct {
 	Disks []DiskMetrics
 	// Backend describes the deployment shape.
 	Backend struct {
-		Type         string // "single" | "erasure"
+		Type             string // "single" | "erasure"
 		StandardSCParity int
 		RRSCParity       int
 	}

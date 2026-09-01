@@ -68,12 +68,12 @@ type listBucketV2Result struct {
 }
 
 type objectXML struct {
-	XMLName      xml.Name `xml:"Contents"`
-	Key          string   `xml:"Key"`
-	LastModified string   `xml:"LastModified"`
-	ETag         string   `xml:"ETag"`
-	Size         int64    `xml:"Size"`
-	StorageClass string   `xml:"StorageClass"`
+	XMLName      xml.Name        `xml:"Contents"`
+	Key          string          `xml:"Key"`
+	LastModified string          `xml:"LastModified"`
+	ETag         string          `xml:"ETag"`
+	Size         int64           `xml:"Size"`
+	StorageClass string          `xml:"StorageClass"`
 	Owner        *canonicalOwner `xml:"Owner,omitempty"`
 }
 
@@ -93,8 +93,8 @@ type initiateMultipartUploadResult struct {
 }
 
 type completeMultipartUpload struct {
-	XMLName xml.Name             `xml:"CompleteMultipartUpload"`
-	Parts   []completePartXML    `xml:"Part"`
+	XMLName xml.Name          `xml:"CompleteMultipartUpload"`
+	Parts   []completePartXML `xml:"Part"`
 }
 
 type completePartXML struct {
@@ -137,23 +137,23 @@ type partXML struct {
 
 type listMultipartUploadsResult struct {
 	XMLName            xml.Name `xml:"ListMultipartUploadsResult"`
-	XMLNS             string   `xml:"xmlns,attr"`
-	Bucket            string   `xml:"Bucket"`
-	KeyMarker         string   `xml:"KeyMarker"`
-	UploadIDMarker    string   `xml:"UploadIdMarker"`
-	NextKeyMarker     string   `xml:"NextKeyMarker"`
-	NextUploadIDMarker string  `xml:"NextUploadIdMarker"`
-	MaxUploads        int      `xml:"MaxUploads"`
-	IsTruncated       bool     `xml:"IsTruncated"`
-	Uploads           []uploadXML
+	XMLNS              string   `xml:"xmlns,attr"`
+	Bucket             string   `xml:"Bucket"`
+	KeyMarker          string   `xml:"KeyMarker"`
+	UploadIDMarker     string   `xml:"UploadIdMarker"`
+	NextKeyMarker      string   `xml:"NextKeyMarker"`
+	NextUploadIDMarker string   `xml:"NextUploadIdMarker"`
+	MaxUploads         int      `xml:"MaxUploads"`
+	IsTruncated        bool     `xml:"IsTruncated"`
+	Uploads            []uploadXML
 }
 
 type uploadXML struct {
-	XMLName   xml.Name `xml:"Upload"`
-	Key       string   `xml:"Key"`
-	UploadID  string   `xml:"UploadId"`
-	Initiated string   `xml:"Initiated"`
-	StorageClass string `xml:"StorageClass"`
+	XMLName      xml.Name `xml:"Upload"`
+	Key          string   `xml:"Key"`
+	UploadID     string   `xml:"UploadId"`
+	Initiated    string   `xml:"Initiated"`
+	StorageClass string   `xml:"StorageClass"`
 }
 
 // --- DeleteObjects -------------------------------------------

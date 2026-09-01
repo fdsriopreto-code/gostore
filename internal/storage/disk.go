@@ -17,19 +17,19 @@ import (
 // Common per-disk errors. The erasure layer interprets these to decide
 // quorum, healing, and which disks to exclude.
 var (
-	ErrDiskNotFound     = errors.New("storage: disk not found / offline")
-	ErrDiskFull         = errors.New("storage: disk full")
-	ErrVolumeNotFound   = errors.New("storage: volume (bucket) not found")
-	ErrVolumeExists     = errors.New("storage: volume already exists")
-	ErrVolumeNotEmpty   = errors.New("storage: volume not empty")
-	ErrFileNotFound     = errors.New("storage: file not found")
+	ErrDiskNotFound        = errors.New("storage: disk not found / offline")
+	ErrDiskFull            = errors.New("storage: disk full")
+	ErrVolumeNotFound      = errors.New("storage: volume (bucket) not found")
+	ErrVolumeExists        = errors.New("storage: volume already exists")
+	ErrVolumeNotEmpty      = errors.New("storage: volume not empty")
+	ErrFileNotFound        = errors.New("storage: file not found")
 	ErrFileVersionNotFound = errors.New("storage: file version not found")
-	ErrFileCorrupt      = errors.New("storage: file failed bitrot check")
-	ErrIsNotRegular     = errors.New("storage: not a regular file")
-	ErrPathNotFound     = errors.New("storage: path not found")
-	ErrTooManyOpenFiles = errors.New("storage: too many open files")
-	ErrUnformattedDisk  = errors.New("storage: disk not formatted for gostore")
-	ErrInconsistentDisk = errors.New("storage: disk format id mismatch")
+	ErrFileCorrupt         = errors.New("storage: file failed bitrot check")
+	ErrIsNotRegular        = errors.New("storage: not a regular file")
+	ErrPathNotFound        = errors.New("storage: path not found")
+	ErrTooManyOpenFiles    = errors.New("storage: too many open files")
+	ErrUnformattedDisk     = errors.New("storage: disk not formatted for gostore")
+	ErrInconsistentDisk    = errors.New("storage: disk format id mismatch")
 )
 
 // VolInfo describes a volume (a volume maps 1:1 to a bucket).
@@ -44,9 +44,9 @@ type FileInfo struct {
 	Volume string
 	Name   string
 
-	VersionID    string
-	IsLatest     bool
-	Deleted      bool // delete marker
+	VersionID string
+	IsLatest  bool
+	Deleted   bool // delete marker
 
 	ModTime time.Time
 	Size    int64
@@ -175,17 +175,17 @@ type StorageAPI interface {
 
 // DiskInfo is the capacity + identity of a single disk.
 type DiskInfo struct {
-	Total   uint64
-	Free    uint64
-	Used    uint64
-	FSType  string
+	Total  uint64
+	Free   uint64
+	Used   uint64
+	FSType string
 
-	RootDisk   bool
-	Healing    bool
-	Endpoint   string
-	MountPath  string
-	ID         string // format.json UUID
-	Error      string
+	RootDisk  bool
+	Healing   bool
+	Endpoint  string
+	MountPath string
+	ID        string // format.json UUID
+	Error     string
 
 	PoolIndex int
 	SetIndex  int

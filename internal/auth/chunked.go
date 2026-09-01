@@ -13,8 +13,8 @@ import (
 
 // Errors returned by the chunked reader.
 var (
-	ErrMalformedChunk    = errors.New("auth: malformed aws-chunked encoding")
-	ErrChunkSignature    = errors.New("auth: chunk signature mismatch")
+	ErrMalformedChunk = errors.New("auth: malformed aws-chunked encoding")
+	ErrChunkSignature = errors.New("auth: chunk signature mismatch")
 )
 
 const chunkPayloadSTS = "AWS4-HMAC-SHA256-PAYLOAD"

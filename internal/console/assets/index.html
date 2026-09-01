@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gostore console</title>
+<style>
+  :root {
+    --bg: #f7f7f8; --panel: #fff; --border: #e3e3e6; --text: #1a1a1c;
+    --muted: #6b6b70; --accent: #2f6feb; --accent-fg: #fff; --danger: #d23b3b;
+    --row-hover: #f0f3fa; --code-bg: #f0f0f2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16171a; --panel: #1e1f23; --border: #313239; --text: #e8e8ea;
+      --muted: #9a9aa2; --accent: #4f8bff; --accent-fg: #fff; --danger: #ff5c5c;
+      --row-hover: #26272c; --code-bg: #26272c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+         background: var(--bg); color: var(--text); }
+  a { color: var(--accent); text-decoration: none; }
+  button { font: inherit; cursor: pointer; border: 1px solid var(--border);
+           background: var(--panel); color: var(--text); border-radius: 7px; padding: 6px 12px; }
+  button.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
+  button.danger { color: var(--danger); border-color: var(--danger); background: transparent; }
+  button:disabled { opacity: .5; cursor: default; }
+  input, select { font: inherit; padding: 7px 9px; border: 1px solid var(--border);
+                  border-radius: 7px; background: var(--panel); color: var(--text); width: 100%; }
+  code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  .hidden { display: none !important; }
+
+  /* login */
+  #login { max-width: 380px; margin: 12vh auto; background: var(--panel);
+           border: 1px solid var(--border); border-radius: 12px; padding: 28px; }
+  #login h1 { margin: 0 0 4px; font-size: 20px; }
+  #login p.sub { margin: 0 0 20px; color: var(--muted); }
+  #login label { display: block; margin: 12px 0 4px; font-size: 12px; color: var(--muted); }
+  #login button { width: 100%; margin-top: 18px; }
+  #loginErr { color: var(--danger); margin-top: 12px; font-size: 13px; min-height: 18px; }
+
+  /* app shell */
+  #app { display: grid; grid-template-columns: 210px 1fr; min-height: 100vh; }
+  nav { background: var(--panel); border-right: 1px solid var(--border); padding: 18px 12px; }
+  nav .brand { font-weight: 700; font-size: 16px; padding: 0 8px 16px; }
+  nav a { display: block; padding: 8px 10px; border-radius: 7px; color: var(--text); }
+  nav a.active { background: var(--accent); color: var(--accent-fg); }
+  nav a:hover:not(.active) { background: var(--row-hover); }
+  nav .foot { position: sticky; top: 100vh; color: var(--muted); font-size: 12px; padding: 8px; }
+  main { padding: 22px 26px; overflow-x: auto; }
+  h2 { margin: 0 0 4px; font-size: 18px; }
+  .bar { display: flex; gap: 8px; align-items: center; margin: 14px 0; flex-wrap: wrap; }
+  .bar .grow { flex: 1; }
+  .crumbs { color: var(--muted); margin: 8px 0; font-size: 13px; }
+  .crumbs a { color: var(--accent); }
+
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); font-size: 13px; }
+  th { color: var(--muted); font-weight: 600; }
+  tbody tr:hover { background: var(--row-hover); }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.actions { text-align: right; white-space: nowrap; }
+  .tag { display: inline-block; background: var(--code-bg); border-radius: 999px;
+         padding: 1px 8px; font-size: 11px; color: var(--muted); margin-right: 4px; }
+  .empty { color: var(--muted); padding: 30px 4px; }
+  .stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; margin: 16px 0; }
+  .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+  .stat .k { color: var(--muted); font-size: 12px; }
+  .stat .v { font-size: 20px; font-weight: 700; margin-top: 2px; }
+  #toast { position: fixed; right: 18px; bottom: 18px; display: flex; flex-direction: column; gap: 8px; z-index: 50; }
+  #toast div { background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--accent);
+               border-radius: 8px; padding: 10px 14px; box-shadow: 0 6px 20px rgba(0,0,0,.15); max-width: 340px; font-size: 13px; }
+  #toast div.err { border-left-color: var(--danger); }
+  dialog { border: 1px solid var(--border); border-radius: 12px; background: var(--panel); color: var(--text);
+           padding: 22px; max-width: 440px; width: 90%; }
+  dialog::backdrop { background: rgba(0,0,0,.4); }
+  dialog h3 { margin: 0 0 14px; }
+  dialog label { display:block; margin: 10px 0 4px; font-size: 12px; color: var(--muted); }
+  dialog .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; }
+</style>
+</head>
+<body>
+
+<section id="login">
+  <h1>gostore</h1>
+  <p class="sub">S3-compatible object storage</p>
+  <label>Access Key</label>
+  <input id="ak" autocomplete="username" autofocus>
+  <label>Secret Key</label>
+  <input id="sk" type="password" autocomplete="current-password">
+  <button class="primary" id="loginBtn">Sign in</button>
+  <div id="loginErr"></div>
+</section>
+
+<div id="app" class="hidden">
+  <nav>
+    <div class="brand">gostore</div>
+    <a data-view="buckets">Buckets</a>
+    <a data-view="identity">Access Keys</a>
+    <a data-view="info">Monitoring</a>
+    <div class="foot">
+      <div id="whoami"></div>
+      <a href="#" id="logout">Sign out</a>
+    </div>
+  </nav>
+  <main id="main"></main>
+</div>
+
+<div id="toast"></div>
+<dialog id="modal"></dialog>
+
+<script src="app.js"></script>
+</body>
+</html>

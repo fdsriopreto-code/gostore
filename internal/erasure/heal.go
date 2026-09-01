@@ -9,11 +9,11 @@ import (
 
 // HealReport summarises a heal pass.
 type HealReport struct {
-	ObjectsScanned int      `json:"objectsScanned"`
-	ObjectsHealed  int      `json:"objectsHealed"`
-	ShardsRewritten int     `json:"shardsRewritten"`
-	MetaRewritten  int      `json:"metaRewritten"`
-	Unrecoverable  []string `json:"unrecoverable,omitempty"`
+	ObjectsScanned  int      `json:"objectsScanned"`
+	ObjectsHealed   int      `json:"objectsHealed"`
+	ShardsRewritten int      `json:"shardsRewritten"`
+	MetaRewritten   int      `json:"metaRewritten"`
+	Unrecoverable   []string `json:"unrecoverable,omitempty"`
 }
 
 // Heal scans every object in every bucket and rewrites any xl.meta or shard

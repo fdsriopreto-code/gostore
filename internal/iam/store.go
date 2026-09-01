@@ -11,10 +11,10 @@ import (
 // is written to <vol>/.gostore.sys/iam/store.json on every volume, and read
 // back from the first one available — no external database.
 type persisted struct {
-	Users     map[string]userRec     `json:"users"`
-	Policies  map[string]string      `json:"policies"` // name -> JSON document
-	SvcAccts  map[string]svcAcctRec  `json:"serviceAccounts"`
-	UpdatedAt time.Time              `json:"updatedAt"`
+	Users     map[string]userRec    `json:"users"`
+	Policies  map[string]string     `json:"policies"` // name -> JSON document
+	SvcAccts  map[string]svcAcctRec `json:"serviceAccounts"`
+	UpdatedAt time.Time             `json:"updatedAt"`
 }
 
 type userRec struct {
@@ -24,10 +24,10 @@ type userRec struct {
 }
 
 type svcAcctRec struct {
-	SecretKey   string `json:"secretKey"`
-	ParentUser  string `json:"parentUser"`
+	SecretKey    string `json:"secretKey"`
+	ParentUser   string `json:"parentUser"`
 	InlinePolicy string `json:"inlinePolicy,omitempty"` // JSON document or ""
-	Status      string `json:"status"`
+	Status       string `json:"status"`
 }
 
 type store struct {

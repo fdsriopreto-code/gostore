@@ -4,11 +4,11 @@ package policy
 // existing tooling/muscle-memory carries over.
 func Builtin() map[string]*Policy {
 	return map[string]*Policy{
-		"readwrite":     mustParse(readWriteJSON),
-		"readonly":      mustParse(readOnlyJSON),
-		"writeonly":     mustParse(writeOnlyJSON),
-		"diagnostics":   mustParse(diagnosticsJSON),
-		"consoleAdmin":  mustParse(consoleAdminJSON),
+		"readwrite":    mustParse(readWriteJSON),
+		"readonly":     mustParse(readOnlyJSON),
+		"writeonly":    mustParse(writeOnlyJSON),
+		"diagnostics":  mustParse(diagnosticsJSON),
+		"consoleAdmin": mustParse(consoleAdminJSON),
 	}
 }
 

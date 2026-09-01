@@ -13,10 +13,10 @@ import (
 
 // Config is one bucket's API-level configuration.
 type Config struct {
-	Policy       json.RawMessage `json:"policy,omitempty"`       // raw bucket policy document
-	CORS         []CORSRule      `json:"cors,omitempty"`
+	Policy       json.RawMessage   `json:"policy,omitempty"` // raw bucket policy document
+	CORS         []CORSRule        `json:"cors,omitempty"`
 	Tags         map[string]string `json:"tags,omitempty"`
-	Notification *Notification   `json:"notification,omitempty"`
+	Notification *Notification     `json:"notification,omitempty"`
 }
 
 // CORSRule mirrors an S3 CORS rule.
