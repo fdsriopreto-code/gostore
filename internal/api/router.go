@@ -1,28 +1,31 @@
 package api
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"os"
 	"strings"
 
-	"github.com/lojadopocket/gostore/internal/auth"
 	"github.com/lojadopocket/gostore/internal/config"
+	"github.com/lojadopocket/gostore/internal/iam"
 	"github.com/lojadopocket/gostore/internal/object"
 )
 
-// Server is the S3 API HTTP handler.
+// Server is the S3 + admin API HTTP handler.
 type Server struct {
-	cfg  config.Config
-	obj  object.Layer
-	creds *auth.Credentials
+	cfg config.Config
+	obj object.Layer
+	iam *iam.Manager
 
 	domainNames []string
 }
 
+type ctxKeyAccessKey struct{}
+
 // NewServer builds the S3 API handler.
-func NewServer(cfg config.Config, obj object.Layer, creds *auth.Credentials) http.Handler {
-	s := &Server{cfg: cfg, obj: obj, creds: creds}
+func NewServer(cfg config.Config, obj object.Layer, im *iam.Manager) http.Handler {
+	s := &Server{cfg: cfg, obj: obj, iam: im}
 	if v := strings.TrimSpace(os.Getenv("GOSTORE_DOMAIN")); v != "" {
 		for _, d := range strings.Split(v, ",") {
 			if d = strings.TrimSpace(d); d != "" {
@@ -36,6 +39,7 @@ func NewServer(cfg config.Config, obj object.Layer, creds *auth.Credentials) htt
 	mux.HandleFunc("GET /gostore/health/ready", s.handleHealthReady)
 	mux.HandleFunc("GET /gostore/health/cluster", s.handleHealthReady)
 	mux.HandleFunc("GET /gostore/health/selftest", s.handleSelfTest)
+	mux.Handle("/gostore/admin/v1/", http.HandlerFunc(s.handleAdmin))
 	mux.Handle("/", http.HandlerFunc(s.handleS3))
 
 	return chain(mux,
@@ -78,14 +82,12 @@ func (s *Server) parseRequest(r *http.Request) s3Request {
 	return s3Request{Bucket: p, Style: "path"}
 }
 
-// handleS3 authenticates then dispatches to the right operation handler.
+// handleS3 authenticates, authorizes, then dispatches to the operation handler.
 func (s *Server) handleS3(w http.ResponseWriter, r *http.Request) {
 	setCommonHeaders(w, s.cfg.Region)
 	req := s.parseRequest(r)
 
-	// Authenticate. On success r.Body may be replaced (chunked upload
-	// decoding) and the verified region is returned.
-	newBody, errCode := s.authenticate(r)
+	newBody, accessKey, errCode := s.authenticate(r)
 	if errCode != ErrNone {
 		writeErrorResponse(w, r, errCode, r.URL.Path)
 		return
@@ -93,8 +95,24 @@ func (s *Server) handleS3(w http.ResponseWriter, r *http.Request) {
 	if newBody != nil {
 		r.Body = newBody
 	}
+	r = r.WithContext(context.WithValue(r.Context(), ctxKeyAccessKey{}, accessKey))
+
+	// STS AssumeRole is allowed for any authenticated caller, ahead of authz.
+	if req.Bucket == "" && isSTSRequest(r) {
+		s.handleAssumeRole(w, r, accessKey)
+		return
+	}
 
 	q := r.URL.Query()
+
+	// Authorize (skipped for anonymous requests, which are only reachable when
+	// GOSTORE_ALLOW_ANONYMOUS=1).
+	if accessKey != "" {
+		if code := s.authorizeS3(r, req, q, accessKey); code != ErrNone {
+			writeErrorResponse(w, r, code, r.URL.Path)
+			return
+		}
+	}
 
 	switch {
 	case req.Bucket == "":

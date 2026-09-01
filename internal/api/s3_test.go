@@ -6,6 +6,7 @@ import (
 	"crypto/md5"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"github.com/lojadopocket/gostore/internal/api"
 	"github.com/lojadopocket/gostore/internal/auth"
 	"github.com/lojadopocket/gostore/internal/config"
+	"github.com/lojadopocket/gostore/internal/iam"
 	fsbackend "github.com/lojadopocket/gostore/internal/object/fs"
 )
 
@@ -35,12 +37,21 @@ func newTestServer(t *testing.T) *httptest.Server {
 	}
 	cfg := config.Default()
 	cfg.Region = region
-	creds := auth.NewRoot(testAK, testSK)
-	return httptest.NewServer(api.NewServer(cfg, backend, creds))
+	im, err := iam.New(testAK, testSK, []string{t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return httptest.NewServer(api.NewServer(cfg, backend, im))
 }
 
-// signV4 signs req (header auth) with a fixed set of signed headers.
+// signV4 signs req (header auth) as the root test credential.
 func signV4(t *testing.T, req *http.Request, payload []byte) {
+	t.Helper()
+	signV4As(t, req, payload, testAK, testSK)
+}
+
+// signV4As signs req with the given access/secret key.
+func signV4As(t *testing.T, req *http.Request, payload []byte, ak, sk string) {
 	t.Helper()
 	now := time.Now().UTC()
 	amzDate := now.Format("20060102T150405Z")
@@ -63,10 +74,10 @@ func signV4(t *testing.T, req *http.Request, payload []byte) {
 		payloadHash
 	scope := dateStamp + "/" + region + "/s3/aws4_request"
 	sts := "AWS4-HMAC-SHA256\n" + amzDate + "\n" + scope + "\n" + sha256Hex([]byte(canonReq))
-	key := auth.SigningKey(testSK, dateStamp, region, "s3")
+	key := auth.SigningKey(sk, dateStamp, region, "s3")
 	sig := hex.EncodeToString(hmacSHA256(key, sts))
 	req.Header.Set("Authorization",
-		"AWS4-HMAC-SHA256 Credential="+testAK+"/"+scope+
+		"AWS4-HMAC-SHA256 Credential="+ak+"/"+scope+
 			", SignedHeaders="+signed+", Signature="+sig)
 }
 
@@ -281,6 +292,82 @@ func md5hex(b []byte) string {
 	h := md5.New()
 	h.Write(b)
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+func doAs(t *testing.T, srv *httptest.Server, ak, sk, method, path string, body []byte) *http.Response {
+	t.Helper()
+	var r io.Reader
+	if body != nil {
+		r = bytes.NewReader(body)
+	}
+	req, _ := http.NewRequest(method, srv.URL+path, r)
+	if body != nil {
+		req.ContentLength = int64(len(body))
+	}
+	signV4As(t, req, body, ak, sk)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("%s %s as %s: %v", method, path, ak, err)
+	}
+	return resp
+}
+
+func TestIAMEndToEnd(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.Close()
+
+	// root creates a bucket and an object
+	if resp := do(t, srv, http.MethodPut, "/shared", []byte{}, nil); resp.StatusCode != 200 {
+		t.Fatalf("create bucket: %d", resp.StatusCode)
+	}
+	if resp := do(t, srv, http.MethodPut, "/shared/readme.txt", []byte("hi"), nil); resp.StatusCode != 200 {
+		t.Fatalf("root put: %d", resp.StatusCode)
+	}
+
+	// root creates a read-only user via the admin API
+	body := []byte(`{"accessKey":"reader01","secretKey":"readersecret1","policies":["readonly"]}`)
+	if resp := doAs(t, srv, testAK, testSK, http.MethodPut, "/gostore/admin/v1/users", body); resp.StatusCode != 200 {
+		t.Fatalf("add-user: %d %s", resp.StatusCode, readBody(t, resp))
+	}
+
+	// reader can GET
+	if resp := doAs(t, srv, "reader01", "readersecret1", http.MethodGet, "/shared/readme.txt", nil); resp.StatusCode != 200 {
+		t.Fatalf("reader GET: want 200, got %d", resp.StatusCode)
+	}
+	// reader can LIST
+	if resp := doAs(t, srv, "reader01", "readersecret1", http.MethodGet, "/shared?list-type=2", nil); resp.StatusCode != 200 {
+		t.Fatalf("reader LIST: want 200, got %d", resp.StatusCode)
+	}
+	// reader CANNOT PUT
+	if resp := doAs(t, srv, "reader01", "readersecret1", http.MethodPut, "/shared/evil.txt", []byte("x")); resp.StatusCode != 403 {
+		t.Fatalf("reader PUT: want 403, got %d %s", resp.StatusCode, readBody(t, resp))
+	}
+	// reader CANNOT use the admin API
+	if resp := doAs(t, srv, "reader01", "readersecret1", http.MethodGet, "/gostore/admin/v1/users", nil); resp.StatusCode != 403 {
+		t.Fatalf("reader admin: want 403, got %d", resp.StatusCode)
+	}
+	// unknown key is rejected at auth
+	if resp := doAs(t, srv, "ghost", "ghostsecret1", http.MethodGet, "/shared/readme.txt", nil); resp.StatusCode != 403 {
+		t.Fatalf("ghost: want 403, got %d", resp.StatusCode)
+	}
+
+	// service account for the reader, then delete the reader -> svc account gone
+	scResp := doAs(t, srv, testAK, testSK, http.MethodPost, "/gostore/admin/v1/service-accounts",
+		[]byte(`{"parentUser":"reader01"}`))
+	if scResp.StatusCode != 200 {
+		t.Fatalf("add svc acct: %d %s", scResp.StatusCode, readBody(t, scResp))
+	}
+	var sc struct{ AccessKey, SecretKey string }
+	_ = json.Unmarshal([]byte(readBody(t, scResp)), &sc)
+	if sc.AccessKey == "" {
+		t.Fatal("no svc acct key returned")
+	}
+	if resp := doAs(t, srv, sc.AccessKey, sc.SecretKey, http.MethodGet, "/shared/readme.txt", nil); resp.StatusCode != 200 {
+		t.Fatalf("svc acct GET: %d", resp.StatusCode)
+	}
+	if resp := doAs(t, srv, sc.AccessKey, sc.SecretKey, http.MethodPut, "/shared/x", []byte("x")); resp.StatusCode != 403 {
+		t.Fatalf("svc acct PUT should inherit readonly deny: %d", resp.StatusCode)
+	}
 }
 
 const emptySHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"

@@ -25,9 +25,9 @@ import (
 	"time"
 
 	"github.com/lojadopocket/gostore/internal/api"
-	"github.com/lojadopocket/gostore/internal/auth"
 	"github.com/lojadopocket/gostore/internal/config"
 	"github.com/lojadopocket/gostore/internal/erasure"
+	"github.com/lojadopocket/gostore/internal/iam"
 	"github.com/lojadopocket/gostore/internal/logger"
 	"github.com/lojadopocket/gostore/internal/object"
 	fsbackend "github.com/lojadopocket/gostore/internal/object/fs"
@@ -166,15 +166,18 @@ func runServer(args []string) error {
 			"dataBlocks", n-n/2, "parityBlocks", n/2)
 	}
 
-	creds := auth.NewRoot(cfg.RootUser, cfg.RootPassword)
-	logger.Info("root credential ready", "accessKey", cfg.RootUser)
+	iamMgr, err := iam.New(cfg.RootUser, cfg.RootPassword, cfg.Volumes)
+	if err != nil {
+		return fmt.Errorf("init IAM: %w", err)
+	}
+	logger.Info("IAM ready", "rootAccessKey", cfg.RootUser, "users", len(iamMgr.ListUsers()))
 	if os.Getenv("GOSTORE_ALLOW_ANONYMOUS") == "1" {
-		logger.Warn("GOSTORE_ALLOW_ANONYMOUS=1: unsigned requests are accepted")
+		logger.Warn("GOSTORE_ALLOW_ANONYMOUS=1: unsigned requests are accepted and skip authorization")
 	}
 
 	apiSrv := &http.Server{
 		Addr:              cfg.Address,
-		Handler:           api.NewServer(cfg, obj, creds),
+		Handler:           api.NewServer(cfg, obj, iamMgr),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	consoleSrv := &http.Server{

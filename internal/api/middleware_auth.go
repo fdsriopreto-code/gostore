@@ -15,48 +15,51 @@ const maxClockSkew = 15 * time.Minute
 
 // authenticate verifies the request's AWS SigV4 credentials (header or
 // presigned). On success it returns a replacement body when the payload is
-// aws-chunked (nil otherwise) and ErrNone. On failure it returns the S3
+// aws-chunked (nil otherwise), the authenticated access key ("" for an
+// allowed anonymous request), and ErrNone. On failure it returns the S3
 // error code to emit.
-func (s *Server) authenticate(r *http.Request) (io.ReadCloser, APIErrorCode) {
+func (s *Server) authenticate(r *http.Request) (io.ReadCloser, string, APIErrorCode) {
 	authHeader := r.Header.Get("Authorization")
 	isPresign := r.URL.Query().Get("X-Amz-Signature") != ""
 
 	if authHeader == "" && !isPresign {
 		if os.Getenv("GOSTORE_ALLOW_ANONYMOUS") == "1" {
-			return nil, ErrNone
+			return nil, "", ErrNone
 		}
-		return nil, ErrAccessDenied
+		return nil, "", ErrAccessDenied
 	}
 
 	if isPresign {
-		return nil, s.verifyPresigned(r)
+		ak, code := s.verifyPresigned(r)
+		return nil, ak, code
 	}
 	return s.verifyHeader(r, authHeader)
 }
 
-func (s *Server) verifyHeader(r *http.Request, authHeader string) (io.ReadCloser, APIErrorCode) {
+func (s *Server) verifyHeader(r *http.Request, authHeader string) (io.ReadCloser, string, APIErrorCode) {
 	parsed, ok := auth.ParseAuthHeader(authHeader)
 	if !ok {
-		return nil, ErrAuthHeaderEmpty
+		return nil, "", ErrAuthHeaderEmpty
 	}
-	secret, ok := s.creds.Lookup(parsed.Scope.AccessKey)
+	secret, ok := s.iam.LookupSecret(parsed.Scope.AccessKey)
 	if !ok {
-		return nil, ErrInvalidAccessKeyID
+		return nil, "", ErrInvalidAccessKeyID
 	}
 
+	ak := parsed.Scope.AccessKey
 	amzDate := r.Header.Get("X-Amz-Date")
 	if amzDate == "" {
 		amzDate = r.Header.Get("Date")
 	}
 	if amzDate == "" {
-		return nil, ErrMissingDateHeader
+		return nil, "", ErrMissingDateHeader
 	}
 	t, err := parseAMZDate(amzDate)
 	if err != nil {
-		return nil, ErrMissingDateHeader
+		return nil, "", ErrMissingDateHeader
 	}
 	if absDuration(time.Since(t)) > maxClockSkew {
-		return nil, ErrRequestTimeTooSkewed
+		return nil, "", ErrRequestTimeTooSkewed
 	}
 
 	hashedPayload := r.Header.Get("X-Amz-Content-Sha256")
@@ -69,11 +72,11 @@ func (s *Server) verifyHeader(r *http.Request, authHeader string) (io.ReadCloser
 	lookup := headerLookup(r, parsed.Scope.Region)
 	canonReq := auth.CanonicalRequest(r.Method, canonURI, canonQuery, parsed.SignedHeaders, lookup, hashedPayload)
 	sts := auth.StringToSign(amzDate, parsed.Scope, canonReq)
-	key := auth.SigningKey(secret, parsed.Scope.Date, parsed.Scope.Region, "s3")
+	key := auth.SigningKey(secret, parsed.Scope.Date, parsed.Scope.Region, parsed.Scope.Service)
 	want := auth.HexHMACSHA256(key, sts)
 
 	if !auth.SecureCompare(want, parsed.Signature) {
-		return nil, ErrSignatureDoesNotMatch
+		return nil, "", ErrSignatureDoesNotMatch
 	}
 
 	if strings.HasPrefix(hashedPayload, "STREAMING-") {
@@ -86,38 +89,38 @@ func (s *Server) verifyHeader(r *http.Request, authHeader string) (io.ReadCloser
 			Scope:         parsed.Scope,
 			Verify:        verify,
 		})
-		return body, ErrNone
+		return body, ak, ErrNone
 	}
-	return nil, ErrNone
+	return nil, ak, ErrNone
 }
 
-func (s *Server) verifyPresigned(r *http.Request) APIErrorCode {
+func (s *Server) verifyPresigned(r *http.Request) (string, APIErrorCode) {
 	q := r.URL.Query()
 	if q.Get("X-Amz-Algorithm") != auth.Algorithm {
-		return ErrUnsupportedSignatureVersion
+		return "", ErrUnsupportedSignatureVersion
 	}
 	credRaw := q.Get("X-Amz-Credential")
 	seg := strings.Split(credRaw, "/")
 	if len(seg) != 5 {
-		return ErrInvalidArgument
+		return "", ErrInvalidArgument
 	}
 	scope := auth.CredentialScope{AccessKey: seg[0], Date: seg[1], Region: seg[2], Service: seg[3]}
-	secret, ok := s.creds.Lookup(scope.AccessKey)
+	secret, ok := s.iam.LookupSecret(scope.AccessKey)
 	if !ok {
-		return ErrInvalidAccessKeyID
+		return "", ErrInvalidAccessKeyID
 	}
 
 	amzDate := q.Get("X-Amz-Date")
 	t, err := parseAMZDate(amzDate)
 	if err != nil {
-		return ErrMissingDateHeader
+		return "", ErrMissingDateHeader
 	}
 	expSecs, _ := strconv.Atoi(q.Get("X-Amz-Expires"))
 	if expSecs <= 0 || expSecs > 7*24*3600 {
-		return ErrInvalidArgument
+		return "", ErrInvalidArgument
 	}
 	if time.Now().UTC().After(t.Add(time.Duration(expSecs) * time.Second)) {
-		return ErrRequestTimeTooSkewed
+		return "", ErrRequestTimeTooSkewed
 	}
 
 	signedHeaders := strings.Split(q.Get("X-Amz-SignedHeaders"), ";")
@@ -128,13 +131,13 @@ func (s *Server) verifyPresigned(r *http.Request) APIErrorCode {
 	lookup := headerLookup(r, scope.Region)
 	canonReq := auth.CanonicalRequest(r.Method, canonURI, canonQuery, sortedLower(signedHeaders), lookup, auth.UnsignedPayload)
 	sts := auth.StringToSign(amzDate, scope, canonReq)
-	key := auth.SigningKey(secret, scope.Date, scope.Region, "s3")
+	key := auth.SigningKey(secret, scope.Date, scope.Region, scope.Service)
 	want := auth.HexHMACSHA256(key, sts)
 
 	if !auth.SecureCompare(want, providedSig) {
-		return ErrSignatureDoesNotMatch
+		return "", ErrSignatureDoesNotMatch
 	}
-	return ErrNone
+	return scope.AccessKey, ErrNone
 }
 
 // headerLookup returns a function that resolves a signed-header name to the
