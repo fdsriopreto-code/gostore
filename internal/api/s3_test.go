@@ -18,7 +18,9 @@ import (
 
 	"github.com/lojadopocket/gostore/internal/api"
 	"github.com/lojadopocket/gostore/internal/auth"
+	"github.com/lojadopocket/gostore/internal/bucketcfg"
 	"github.com/lojadopocket/gostore/internal/config"
+	"github.com/lojadopocket/gostore/internal/event"
 	"github.com/lojadopocket/gostore/internal/iam"
 	fsbackend "github.com/lojadopocket/gostore/internal/object/fs"
 )
@@ -37,11 +39,16 @@ func newTestServer(t *testing.T) *httptest.Server {
 	}
 	cfg := config.Default()
 	cfg.Region = region
-	im, err := iam.New(testAK, testSK, []string{t.TempDir()})
+	dir := t.TempDir()
+	im, err := iam.New(testAK, testSK, []string{dir})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return httptest.NewServer(api.NewServer(cfg, backend, im))
+	bc, err := bucketcfg.Open([]string{dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return httptest.NewServer(api.NewServer(cfg, backend, im, bc, event.New(bc)))
 }
 
 // signV4 signs req (header auth) as the root test credential.
@@ -268,6 +275,61 @@ func TestS3EndToEnd(t *testing.T) {
 			t.Fatalf("DeleteBucket: %d %s", resp.StatusCode, readBody(t, resp))
 		}
 	}
+}
+
+func TestBucketPolicyPublicRead(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.Close()
+
+	do(t, srv, http.MethodPut, "/pub", []byte{}, nil).Body.Close()
+	do(t, srv, http.MethodPut, "/pub/hello.txt", []byte("world"), nil).Body.Close()
+
+	// anonymous GET denied before a policy exists
+	if resp, _ := srv.Client().Get(srv.URL + "/pub/hello.txt"); resp.StatusCode != 403 {
+		t.Fatalf("anon GET before policy: want 403, got %d", resp.StatusCode)
+	}
+
+	pol := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":["s3:GetObject"],"Resource":["arn:aws:s3:::pub/*"]}]}`
+	if resp := doAs(t, srv, testAK, testSK, http.MethodPut, "/pub?policy", []byte(pol)); resp.StatusCode/100 != 2 {
+		t.Fatalf("put bucket policy: %d %s", resp.StatusCode, readBody(t, resp))
+	}
+
+	// now anonymous GET works
+	resp, err := srv.Client().Get(srv.URL + "/pub/hello.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 || readBody(t, resp) != "world" {
+		t.Fatalf("anon GET after policy: %d", resp.StatusCode)
+	}
+	// anonymous PUT still denied (policy only granted GetObject)
+	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/pub/x.txt", bytes.NewReader([]byte("x")))
+	if resp, _ := srv.Client().Do(req); resp.StatusCode != 403 {
+		t.Fatalf("anon PUT: want 403, got %d", resp.StatusCode)
+	}
+}
+
+func TestObjectTagging(t *testing.T) {
+	srv := newTestServer(t)
+	defer srv.Close()
+	do(t, srv, http.MethodPut, "/tags", []byte{}, nil).Body.Close()
+	do(t, srv, http.MethodPut, "/tags/f", []byte("data"), nil).Body.Close()
+
+	body := `<Tagging><TagSet><Tag><Key>env</Key><Value>prod</Value></Tag><Tag><Key>team</Key><Value>core</Value></Tag></TagSet></Tagging>`
+	if resp := do(t, srv, http.MethodPut, "/tags/f?tagging", []byte(body), nil); resp.StatusCode/100 != 2 {
+		t.Fatalf("put tags: %d %s", resp.StatusCode, readBody(t, resp))
+	}
+	resp := do(t, srv, http.MethodGet, "/tags/f?tagging", nil, nil)
+	got := readBody(t, resp)
+	if !strings.Contains(got, "<Key>env</Key>") || !strings.Contains(got, "<Value>prod</Value>") {
+		t.Fatalf("get tags: %s", got)
+	}
+	// tags also surface as x-amz-tagging-count on HEAD
+	h := do(t, srv, http.MethodHead, "/tags/f", nil, nil)
+	if h.Header.Get("x-amz-tagging-count") != "2" {
+		t.Fatalf("tagging-count header: %q", h.Header.Get("x-amz-tagging-count"))
+	}
+	h.Body.Close()
 }
 
 func TestBadSignatureRejected(t *testing.T) {

@@ -7,16 +7,20 @@ import (
 	"os"
 	"strings"
 
+	"github.com/lojadopocket/gostore/internal/bucketcfg"
 	"github.com/lojadopocket/gostore/internal/config"
+	"github.com/lojadopocket/gostore/internal/event"
 	"github.com/lojadopocket/gostore/internal/iam"
 	"github.com/lojadopocket/gostore/internal/object"
 )
 
 // Server is the S3 + admin API HTTP handler.
 type Server struct {
-	cfg config.Config
-	obj object.Layer
-	iam *iam.Manager
+	cfg  config.Config
+	obj  object.Layer
+	iam  *iam.Manager
+	bcfg *bucketcfg.Store
+	bus  *event.Bus
 
 	domainNames []string
 }
@@ -24,8 +28,8 @@ type Server struct {
 type ctxKeyAccessKey struct{}
 
 // NewServer builds the S3 API handler.
-func NewServer(cfg config.Config, obj object.Layer, im *iam.Manager) http.Handler {
-	s := &Server{cfg: cfg, obj: obj, iam: im}
+func NewServer(cfg config.Config, obj object.Layer, im *iam.Manager, bc *bucketcfg.Store, bus *event.Bus) http.Handler {
+	s := &Server{cfg: cfg, obj: obj, iam: im, bcfg: bc, bus: bus}
 	if v := strings.TrimSpace(os.Getenv("GOSTORE_DOMAIN")); v != "" {
 		for _, d := range strings.Split(v, ",") {
 			if d = strings.TrimSpace(d); d != "" {
@@ -105,13 +109,14 @@ func (s *Server) handleS3(w http.ResponseWriter, r *http.Request) {
 
 	q := r.URL.Query()
 
-	// Authorize (skipped for anonymous requests, which are only reachable when
-	// GOSTORE_ALLOW_ANONYMOUS=1).
-	if accessKey != "" {
-		if code := s.authorizeS3(r, req, q, accessKey); code != ErrNone {
-			writeErrorResponse(w, r, code, r.URL.Path)
-			return
-		}
+	// CORS: answer preflight, and stamp headers on the eventual response.
+	if s.applyCORS(w, r, req.Bucket) {
+		return
+	}
+
+	if code := s.authorizeS3(r, req, q, accessKey); code != ErrNone {
+		writeErrorResponse(w, r, code, r.URL.Path)
+		return
 	}
 
 	switch {
@@ -143,25 +148,47 @@ func (s *Server) dispatchBucket(w http.ResponseWriter, r *http.Request, bucket s
 			s.handleGetBucketVersioning(w, r, bucket)
 		case has("versions"):
 			s.handleListObjectVersions(w, r, bucket)
+		case has("policy"):
+			s.handleGetBucketPolicy(w, r, bucket)
+		case has("tagging"):
+			s.handleGetBucketTagging(w, r, bucket)
+		case has("cors"):
+			s.handleGetBucketCORS(w, r, bucket)
+		case has("notification"):
+			s.handleGetBucketNotification(w, r, bucket)
 		case q["list-type"] != nil && q["list-type"][0] == "2":
 			s.handleListObjectsV2(w, r, bucket)
 		default:
 			s.handleListObjectsV1(w, r, bucket)
 		}
 	case http.MethodPut:
-		if has("versioning") || has("acl") || has("policy") || has("tagging") ||
-			has("lifecycle") || has("cors") || has("object-lock") {
-			// Feature endpoints (M10). Accept-and-ignore keeps clients happy.
-			writeSuccessOK(w)
-			return
+		switch {
+		case has("policy"):
+			s.handlePutBucketPolicy(w, r, bucket)
+		case has("tagging"):
+			s.handlePutBucketTagging(w, r, bucket)
+		case has("cors"):
+			s.handlePutBucketCORS(w, r, bucket)
+		case has("notification"):
+			s.handlePutBucketNotification(w, r, bucket)
+		case has("versioning") || has("acl") || has("lifecycle") || has("object-lock"):
+			writeSuccessOK(w) // accept-and-ignore (deep versioning/WORM: deferred)
+		default:
+			s.handleCreateBucket(w, r, bucket)
 		}
-		s.handleCreateBucket(w, r, bucket)
 	case http.MethodDelete:
-		if has("policy") || has("tagging") || has("lifecycle") || has("cors") {
+		switch {
+		case has("policy"):
+			s.handleDeleteBucketPolicy(w, r, bucket)
+		case has("tagging"):
+			s.handleDeleteBucketTagging(w, r, bucket)
+		case has("cors"):
+			s.handleDeleteBucketCORS(w, r, bucket)
+		case has("lifecycle"):
 			writeSuccessNoContent(w)
-			return
+		default:
+			s.handleDeleteBucket(w, r, bucket)
 		}
-		s.handleDeleteBucket(w, r, bucket)
 	case http.MethodHead:
 		s.handleHeadBucket(w, r, bucket)
 	case http.MethodPost:
@@ -184,7 +211,11 @@ func (s *Server) dispatchObject(w http.ResponseWriter, r *http.Request, bucket, 
 			s.handleListObjectParts(w, r, bucket, object)
 			return
 		}
-		if has("acl") || has("tagging") {
+		if has("tagging") {
+			s.handleGetObjectTagging(w, r, bucket, object)
+			return
+		}
+		if has("acl") {
 			writeErrorResponse(w, r, ErrNotImplemented, res)
 			return
 		}
@@ -204,7 +235,11 @@ func (s *Server) dispatchObject(w http.ResponseWriter, r *http.Request, bucket, 
 			s.handleCopyObject(w, r, bucket, object)
 			return
 		}
-		if has("acl") || has("tagging") {
+		if has("tagging") {
+			s.handlePutObjectTagging(w, r, bucket, object)
+			return
+		}
+		if has("acl") {
 			writeSuccessOK(w)
 			return
 		}
@@ -222,6 +257,10 @@ func (s *Server) dispatchObject(w http.ResponseWriter, r *http.Request, bucket, 
 	case http.MethodDelete:
 		if has("uploadId") {
 			s.handleAbortMultipartUpload(w, r, bucket, object)
+			return
+		}
+		if has("tagging") {
+			s.handleDeleteObjectTagging(w, r, bucket, object)
 			return
 		}
 		s.handleDeleteObject(w, r, bucket, object)

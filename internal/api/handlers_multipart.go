@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/lojadopocket/gostore/internal/event"
 	"github.com/lojadopocket/gostore/internal/object"
 )
 
@@ -164,6 +165,7 @@ func (s *Server) handleCompleteMultipartUpload(w http.ResponseWriter, r *http.Re
 		writeErrorResponse(w, r, toAPIError(err), "/"+bucket+"/"+key)
 		return
 	}
+	s.notify(r, event.ObjectCreated, bucket, key, oi.Size, oi.ETag)
 	// S3 streams whitespace while assembling; we just return the result.
 	scheme := "http"
 	if r.TLS != nil {

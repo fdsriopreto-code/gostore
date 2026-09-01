@@ -130,6 +130,9 @@ func (p *Policy) IsAllowed(a Args) bool {
 }
 
 func (st Statement) matches(a Args) bool {
+	if !st.matchPrincipal(a) {
+		return false
+	}
 	if !st.matchAction(a.Action) {
 		return false
 	}
@@ -140,6 +143,26 @@ func (st Statement) matches(a Args) bool {
 		return false
 	}
 	return true
+}
+
+// matchPrincipal is only meaningful for bucket policies. An IAM policy has no
+// Principal, in which case it is not evaluated.
+func (st Statement) matchPrincipal(a Args) bool {
+	if st.Principal.raw == "" && len(st.Principal.AWS) == 0 {
+		return true
+	}
+	if st.Principal.IsPublic() {
+		return true
+	}
+	if a.AccountName == "" {
+		return false
+	}
+	for _, p := range st.Principal.AWS {
+		if p == a.AccountName || strings.HasSuffix(p, "/"+a.AccountName) || strings.HasSuffix(p, ":"+a.AccountName) {
+			return true
+		}
+	}
+	return false
 }
 
 func (st Statement) matchAction(action string) bool {

@@ -23,10 +23,9 @@ func (s *Server) authenticate(r *http.Request) (io.ReadCloser, string, APIErrorC
 	isPresign := r.URL.Query().Get("X-Amz-Signature") != ""
 
 	if authHeader == "" && !isPresign {
-		if os.Getenv("GOSTORE_ALLOW_ANONYMOUS") == "1" {
-			return nil, "", ErrNone
-		}
-		return nil, "", ErrAccessDenied
+		// No credentials: proceed as anonymous. authorizeS3 decides whether
+		// the bucket policy (or GOSTORE_ALLOW_ANONYMOUS) permits it.
+		return nil, "", ErrNone
 	}
 
 	if isPresign {

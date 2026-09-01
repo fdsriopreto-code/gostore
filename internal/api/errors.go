@@ -45,6 +45,9 @@ const (
 	ErrUnsupportedSignatureVersion
 	ErrMissingDateHeader
 	ErrSlowDown
+	ErrNoSuchBucketPolicy
+	ErrNoSuchCORSConfiguration
+	ErrNoSuchTagSet
 )
 
 // APIError is the resolved (code, message, http status) triple.
@@ -89,6 +92,9 @@ var errorCodeMap = map[APIErrorCode]APIError{
 	ErrUnsupportedSignatureVersion: {"InvalidRequest", "The authorization mechanism you have provided is not supported.", http.StatusBadRequest},
 	ErrMissingDateHeader:       {"AccessDenied", "AWS authentication requires a valid Date or x-amz-date header.", http.StatusForbidden},
 	ErrSlowDown:                {"SlowDown", "Resource requested is unreadable, please reduce your request rate.", http.StatusServiceUnavailable},
+	ErrNoSuchBucketPolicy:      {"NoSuchBucketPolicy", "The bucket policy does not exist.", http.StatusNotFound},
+	ErrNoSuchCORSConfiguration: {"NoSuchCORSConfiguration", "The CORS configuration does not exist.", http.StatusNotFound},
+	ErrNoSuchTagSet:            {"NoSuchTagSet", "The TagSet does not exist.", http.StatusNotFound},
 }
 
 // GetAPIError resolves a code; unknown codes fall back to InternalError.

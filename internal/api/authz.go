@@ -3,27 +3,54 @@ package api
 import (
 	"net"
 	"net/http"
+	"os"
 
 	"github.com/lojadopocket/gostore/internal/iam/policy"
 )
 
-// authorizeS3 checks the authenticated access key is permitted to perform the
-// operation the request maps to. Returns ErrNone when allowed.
+// authorizeS3 decides whether the request may proceed. Order:
+//  1. IAM policy of the authenticated user (root always passes);
+//  2. the bucket policy (covers anonymous / cross-account public access);
+//  3. GOSTORE_ALLOW_ANONYMOUS=1 as a dev-mode escape hatch.
 func (s *Server) authorizeS3(r *http.Request, req s3Request, q map[string][]string, accessKey string) APIErrorCode {
 	action := s3Action(r, req, q)
 	args := policy.Args{
-		Action:     action,
-		BucketName: req.Bucket,
-		ObjectName: req.Object,
-		SourceIP:   clientIP(r),
+		AccountName: accessKey,
+		Action:      action,
+		BucketName:  req.Bucket,
+		ObjectName:  req.Object,
+		SourceIP:    clientIP(r),
 		ConditionValues: map[string][]string{
 			"s3:prefix": first(q["prefix"]),
 		},
 	}
-	if s.iam.IsAllowed(accessKey, args) {
+
+	if accessKey != "" && s.iam.IsAllowed(accessKey, args) {
+		return ErrNone
+	}
+	if s.bucketPolicyAllows(req.Bucket, args) {
+		return ErrNone
+	}
+	if accessKey == "" && os.Getenv("GOSTORE_ALLOW_ANONYMOUS") == "1" {
 		return ErrNone
 	}
 	return ErrAccessDenied
+}
+
+// bucketPolicyAllows evaluates the bucket's own policy document (if any).
+func (s *Server) bucketPolicyAllows(bucket string, args policy.Args) bool {
+	if bucket == "" || s.bcfg == nil {
+		return false
+	}
+	doc := s.bcfg.Get(bucket).Policy
+	if len(doc) == 0 {
+		return false
+	}
+	p, err := policy.Parse(doc)
+	if err != nil {
+		return false
+	}
+	return p.IsAllowed(args)
 }
 
 func first(v []string) []string {

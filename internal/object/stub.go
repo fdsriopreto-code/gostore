@@ -49,6 +49,15 @@ func (*Stub) GetObjectInfo(context.Context, string, string, ObjectOptions) (Obje
 func (*Stub) PutObject(context.Context, string, string, *PutObjReader, ObjectOptions) (ObjectInfo, error) {
 	return ObjectInfo{}, ErrNotImplemented
 }
+func (*Stub) PutObjectTags(context.Context, string, string, string, ObjectOptions) (ObjectInfo, error) {
+	return ObjectInfo{}, ErrNotImplemented
+}
+func (*Stub) GetObjectTags(context.Context, string, string, ObjectOptions) (string, error) {
+	return "", ErrNotImplemented
+}
+func (*Stub) DeleteObjectTags(context.Context, string, string, ObjectOptions) error {
+	return ErrNotImplemented
+}
 func (*Stub) CopyObject(context.Context, string, string, string, string, ObjectInfo, ObjectOptions, ObjectOptions) (ObjectInfo, error) {
 	return ObjectInfo{}, ErrNotImplemented
 }

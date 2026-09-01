@@ -50,6 +50,13 @@ type Layer interface {
 
 	PutObject(ctx context.Context, bucket, object string, data *PutObjReader, opts ObjectOptions) (ObjectInfo, error)
 
+	// PutObjectTags / GetObjectTags / DeleteObjectTags manage an object's tag
+	// set without rewriting its data (S3 ?tagging sub-resource). tags is the
+	// raw "k1=v1&k2=v2" form.
+	PutObjectTags(ctx context.Context, bucket, object, tags string, opts ObjectOptions) (ObjectInfo, error)
+	GetObjectTags(ctx context.Context, bucket, object string, opts ObjectOptions) (string, error)
+	DeleteObjectTags(ctx context.Context, bucket, object string, opts ObjectOptions) error
+
 	CopyObject(ctx context.Context, srcBucket, srcObject, dstBucket, dstObject string, srcInfo ObjectInfo, srcOpts, dstOpts ObjectOptions) (ObjectInfo, error)
 
 	DeleteObject(ctx context.Context, bucket, object string, opts ObjectOptions) (ObjectInfo, error)

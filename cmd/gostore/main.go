@@ -25,8 +25,10 @@ import (
 	"time"
 
 	"github.com/lojadopocket/gostore/internal/api"
+	"github.com/lojadopocket/gostore/internal/bucketcfg"
 	"github.com/lojadopocket/gostore/internal/config"
 	"github.com/lojadopocket/gostore/internal/erasure"
+	"github.com/lojadopocket/gostore/internal/event"
 	"github.com/lojadopocket/gostore/internal/iam"
 	"github.com/lojadopocket/gostore/internal/logger"
 	"github.com/lojadopocket/gostore/internal/object"
@@ -175,9 +177,15 @@ func runServer(args []string) error {
 		logger.Warn("GOSTORE_ALLOW_ANONYMOUS=1: unsigned requests are accepted and skip authorization")
 	}
 
+	bcfg, err := bucketcfg.Open(cfg.Volumes)
+	if err != nil {
+		return fmt.Errorf("init bucket config: %w", err)
+	}
+	bus := event.New(bcfg)
+
 	apiSrv := &http.Server{
 		Addr:              cfg.Address,
-		Handler:           api.NewServer(cfg, obj, iamMgr),
+		Handler:           api.NewServer(cfg, obj, iamMgr, bcfg, bus),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	consoleSrv := &http.Server{

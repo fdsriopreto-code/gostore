@@ -54,6 +54,9 @@ func (s *Server) handleDeleteBucket(w http.ResponseWriter, r *http.Request, buck
 		writeErrorResponse(w, r, toAPIError(err), "/"+bucket)
 		return
 	}
+	if s.bcfg != nil {
+		_ = s.bcfg.Delete(bucket)
+	}
 	writeSuccessNoContent(w)
 }
 

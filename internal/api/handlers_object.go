@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lojadopocket/gostore/internal/event"
 	"github.com/lojadopocket/gostore/internal/object"
 )
 
@@ -40,6 +41,7 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, bucket,
 		return
 	}
 	w.Header().Set("ETag", quoteETag(oi.ETag))
+	s.notify(r, event.ObjectCreated, bucket, key, oi.Size, oi.ETag)
 	writeSuccessOK(w)
 }
 
@@ -115,7 +117,19 @@ func (s *Server) handleDeleteObject(w http.ResponseWriter, r *http.Request, buck
 			return
 		}
 	}
+	s.notify(r, event.ObjectRemoved, bucket, key, 0, "")
 	writeSuccessNoContent(w)
+}
+
+// notify publishes a bucket-notification event (no-op if no bus / no targets).
+func (s *Server) notify(r *http.Request, kind event.Kind, bucket, key string, size int64, etag string) {
+	if s.bus == nil {
+		return
+	}
+	s.bus.Publish(event.Event{
+		Kind: kind, Bucket: bucket, Key: key, Size: size,
+		ETag: strings.Trim(etag, `"`), SourceIP: clientIP(r),
+	})
 }
 
 func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
@@ -145,6 +159,7 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, bucket
 		writeErrorResponse(w, r, toAPIError(err), "/"+bucket+"/"+key)
 		return
 	}
+	s.notify(r, event.ObjectCreated, bucket, key, oi.Size, oi.ETag)
 	writeXML(w, http.StatusOK, copyObjectResult{
 		XMLNS: s3XMLNS, LastModified: amzTime(oi.ModTime), ETag: quoteETag(oi.ETag),
 	})
