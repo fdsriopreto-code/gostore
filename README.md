@@ -99,6 +99,30 @@ Se usar **bind mount de host** (`-v /srv/gostore/data:/data`), o dono do
 diretório do host prevalece, então antes:
 `sudo mkdir -p /srv/gostore/data && sudo chown -R 65532:65532 /srv/gostore/data`.
 
+### EasyPanel / Coolify / Dokploy (PaaS sem shell)
+
+1. **App type:** Dockerfile (aponta pro repo `gostore`, branch `main`).
+2. **Porta exposta:** `9000` (a API S3). A `9001` do console é opcional.
+3. **Env vars:**
+   ```
+   GOSTORE_ROOT_USER=gostoreadmin
+   GOSTORE_ROOT_PASSWORD=<senha forte, >=8>
+   GOSTORE_REGION=us-east-1
+   ```
+4. **Volume / Mount:** monta um volume persistente em `/data`. A imagem roda
+   como root, então mount root-owned do painel funciona sem chown.
+5. Deploy. Domínio do painel -> serviço, porta `9000`.
+
+**Validar sem CLI:** abre no navegador
+`https://SEU_DOMINIO/gostore/health/selftest` — o servidor faz um round-trip
+interno (MakeBucket -> PutObject -> GetObject -> verifica bytes -> ListObjectsV2
+-> DeleteObject -> DeleteBucket) e responde JSON `{"ok": true, "steps": [...]}`.
+Se vier `ok:true`, o engine de storage tá 100%. (Desabilita com
+`GOSTORE_DISABLE_SELFTEST=1`.)
+
+Depois é só apontar `mc` / `aws` / SDK do seu PC pro `https://SEU_DOMINIO`
+(path-style) com as credenciais acima.
+
 ### VPS (systemd, bare-metal)
 
 ```bash

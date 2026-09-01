@@ -35,6 +35,7 @@ func NewServer(cfg config.Config, obj object.Layer, creds *auth.Credentials) htt
 	mux.HandleFunc("GET /gostore/health/live", s.handleHealthLive)
 	mux.HandleFunc("GET /gostore/health/ready", s.handleHealthReady)
 	mux.HandleFunc("GET /gostore/health/cluster", s.handleHealthReady)
+	mux.HandleFunc("GET /gostore/health/selftest", s.handleSelfTest)
 	mux.Handle("/", http.HandlerFunc(s.handleS3))
 
 	return chain(mux,
