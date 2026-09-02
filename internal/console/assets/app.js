@@ -311,7 +311,15 @@ function modal(title, hint, fields, onOK, okLabel = "Create") {
 /* ---------- drawer ---------- */
 function closeDrawer() { $("#drawer").classList.remove("on"); $("#scrim").classList.remove("on"); }
 $("#scrim").onclick = closeDrawer;
-addEventListener("keydown", (e) => e.key === "Escape" && closeDrawer());
+addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { closeDrawer(); return; }
+  // "/" focuses the folder filter when not already typing somewhere.
+  const tag = (e.target.tagName || "").toLowerCase();
+  if (e.key === "/" && tag !== "input" && tag !== "textarea") {
+    const f = document.querySelector("#view .search input");
+    if (f) { e.preventDefault(); f.focus(); }
+  }
+});
 function openDrawer(build) { const d = $("#drawer"); d.innerHTML = ""; build(d); d.classList.add("on"); $("#scrim").classList.add("on"); }
 
 /* ============================ routing ============================ */
@@ -518,6 +526,7 @@ function nameCell(bucket, key, nm) {
 }
 
 let bucketPrefix = "";
+let objSort = { col: "name", dir: 1 }; // dir: 1 asc, -1 desc
 async function bucketObjects(v, b) {
   const fi = el("input", { type: "file", multiple: "true", style: "display:none" });
   fi.onchange = () => doUpload(b, [...fi.files].map((f) => ({ file: f, path: f.name })));
@@ -543,6 +552,7 @@ async function bucketObjects(v, b) {
         { name: "c", label: "Example", value: `curl -T ./file '${url}'`, readonly: true },
       ], async () => {}, "Done");
     } }, ic(ICON.link), "Upload link"),
+    el("button", { class: "ghost", onclick: () => newFolder(b) }, ic(ICON.folder), "New folder"),
     el("button", { class: "ghost", onclick: () => fd.click() }, ic(ICON.folder), "Upload folder"), fd,
     el("button", { class: "primary", onclick: () => fi.click() }, ic(ICON.up), "Upload"), fi);
   v.append(tb);
@@ -572,6 +582,13 @@ async function bucketObjects(v, b) {
   })).filter((o) => o.key !== bucketPrefix);
 
   if (!prefixes.length && !objs.length) { v.append(emptyState(ICON.folder, "Empty folder", "Drag files here or use Upload.")); return; }
+  const skey = objSort.col === "modified" ? (o) => o.lm || "" : objSort.col === "size" ? (o) => +o.size || 0 : (o) => o.key.toLowerCase();
+  objs.sort((a, c) => { const x = skey(a), y = skey(c); return (x < y ? -1 : x > y ? 1 : 0) * objSort.dir; });
+  const sortableTh = (label, col, cls) => {
+    const active = objSort.col === col;
+    return el("th", { class: (cls || "") + " sorth" + (active ? " on" : ""), onclick: () => { objSort = { col, dir: active ? -objSort.dir : 1 }; render(); } },
+      label, active ? el("span", { class: "sarrow" }, objSort.dir > 0 ? " ▲" : " ▼") : null);
+  };
   const tbody = el("tbody");
   const selAll = el("input", { type: "checkbox" });
   selAll.onchange = () => { tbody.querySelectorAll(".rc").forEach((c) => { c.checked = selAll.checked; }); syncBulk(); };
@@ -597,10 +614,11 @@ async function bucketObjects(v, b) {
   }
   const bulk = el("div", { class: "toolbar hidden", id: "bulkbar" },
     el("span", { class: "muted small", id: "bulkn" }),
+    el("button", { class: "ghost sm", onclick: () => bulkDl(b, tbody) }, ic(ICON.down), "Download selected"),
     el("button", { class: "danger sm", onclick: () => bulkDel(b, tbody) }, ic(ICON.trash), "Delete selected"));
   v.append(bulk);
   v.append(el("div", { class: "card" }, el("table", {}, el("thead", {}, el("tr", {},
-    el("th", { style: "width:34px" }, selAll), el("th", {}, "Name"), el("th", {}, "Modified"), el("th", { class: "num" }, "Size"), el("th", {}))), tbody)));
+    el("th", { style: "width:34px" }, selAll), sortableTh("Name", "name"), sortableTh("Modified", "modified"), sortableTh("Size", "size", "num"), el("th", {}))), tbody)));
 
   function syncBulk() {
     const n = tbody.querySelectorAll(".rc:checked").length;
@@ -613,6 +631,19 @@ async function bulkDel(b, tbody) {
   const body = `<Delete>${keys.map((k) => `<Object><Key>${k.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</Key></Object>`).join("")}</Delete>`;
   await must(await api("POST", "/" + b, { query: { delete: "" }, contentType: "application/xml", body }));
   toast("Deleted " + keys.length, "ok"); render();
+}
+async function bulkDl(b, tbody) {
+  const keys = [...tbody.querySelectorAll(".rc:checked")].map((c) => c.dataset.key);
+  if (!keys.length) return;
+  toast("Starting " + keys.length + " download(s)…", "ok");
+  for (const k of keys) { dl(b, k); await new Promise((r) => setTimeout(r, 350)); }
+}
+async function newFolder(b) {
+  const name = (prompt("New folder name:", "") || "").trim().replace(/^\/+|\/+$/g, "");
+  if (!name) return;
+  const key = bucketPrefix + name + "/";
+  await must(await api("PUT", "/" + b + "/" + key, { body: "" }));
+  toast("Folder created", "ok"); render();
 }
 function filterRows(q) {
   q = q.toLowerCase();
@@ -1322,7 +1353,8 @@ const putUrl = await getSignedUrl(s3, new PutObjectCommand({ Bucket: "b", Key: "
     ]));
     c.append(el("h3", {}, "Object"));
     c.append(TBL(["Operation", "Notes"], [
-      ["PutObject", "incl. <code>aws-chunked</code> streaming; <code>x-amz-server-side-encryption: AES256</code>"],
+      ["PutObject", "incl. <code>aws-chunked</code> streaming; <code>x-amz-server-side-encryption: AES256</code>; conditional <code>If-None-Match: *</code> / <code>If-None-Match: &quot;etag&quot;</code> / <code>If-Match: &quot;etag&quot;</code> → 412 (optimistic concurrency)"],
+      ["POST /{bucket} (POST Object)", "browser form upload (<code>multipart/form-data</code>) with a base64 <code>policy</code> + SigV4 signature; supports <code>starts-with</code>, <code>eq</code>, <code>content-length-range</code> conditions, <code>${filename}</code>, <code>success_action_redirect</code>/<code>_status</code>. Upload straight from a web page with no backend proxy."],
       ["GetObject / HeadObject", "Range, If-Match / If-None-Match / If-*-Since, <code>?versionId</code>"],
       ["DeleteObject / DeleteObjects", "versioned delete adds a marker; <code>x-amz-bypass-governance-retention</code>"],
       ["CopyObject / UploadPartCopy", "<code>x-amz-metadata-directive</code>"],

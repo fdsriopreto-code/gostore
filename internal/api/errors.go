@@ -55,6 +55,8 @@ const (
 	ErrInvalidBucketState
 	ErrNoSuchLifecycleConfiguration
 	ErrQuotaExceeded
+	ErrMalformedPOSTRequest
+	ErrInvalidPolicyDocument
 )
 
 // APIError is the resolved (code, message, http status) triple.
@@ -107,6 +109,8 @@ var errorCodeMap = map[APIErrorCode]APIError{
 	ErrInvalidBucketState:            {"InvalidBucketState", "The request is not valid for the current state of the bucket.", http.StatusConflict},
 	ErrNoSuchLifecycleConfiguration:  {"NoSuchLifecycleConfiguration", "The lifecycle configuration does not exist.", http.StatusNotFound},
 	ErrQuotaExceeded:                 {"QuotaExceeded", "The bucket quota would be exceeded by this operation.", http.StatusForbidden},
+	ErrMalformedPOSTRequest:          {"MalformedPOSTRequest", "The body of your POST request is not well-formed multipart/form-data.", http.StatusBadRequest},
+	ErrInvalidPolicyDocument:         {"InvalidPolicyDocument", "The content of the form does not meet the conditions specified in the policy document.", http.StatusForbidden},
 }
 
 // GetAPIError resolves a code; unknown codes fall back to InternalError.

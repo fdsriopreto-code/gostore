@@ -150,6 +150,13 @@ func (s *Server) handleS3(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Browser POST-form upload authenticates via its own signed policy, not
+	// the Authorization header — handle it before the normal authz path.
+	if isPostFormUpload(r, req) {
+		s.handlePostObjectForm(w, r, req.Bucket)
+		return
+	}
+
 	q := r.URL.Query()
 
 	// CORS: answer preflight, and stamp headers on the eventual response.

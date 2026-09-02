@@ -39,9 +39,31 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, bucket,
 	if v := r.Header.Get("x-amz-tagging"); v != "" {
 		opts.UserTags = v
 	}
-	// Conditional write: If-None-Match: * fails when the object already exists.
-	if inm := r.Header.Get("If-None-Match"); inm == "*" {
-		opts.CheckPrecondFn = func(oi object.ObjectInfo) bool { return oi.Name != "" && oi.ETag != "" }
+	// Conditional writes (S3 / RFC 7232). CheckPrecondFn returns true to mean
+	// "precondition failed, abort with 412"; the backend only calls it when
+	// the object already exists.
+	if inm := r.Header.Get("If-None-Match"); inm != "" {
+		if inm == "*" {
+			// Atomic create-if-absent.
+			opts.CheckPrecondFn = func(oi object.ObjectInfo) bool { return oi.Name != "" && oi.ETag != "" }
+		} else {
+			opts.CheckPrecondFn = func(oi object.ObjectInfo) bool {
+				return etagMatches(inm, strings.Trim(oi.ETag, `"`))
+			}
+		}
+	} else if im := r.Header.Get("If-Match"); im != "" {
+		// If-Match requires the object to exist; the backend won't run the
+		// precondition fn when it doesn't, so pre-check.
+		if cur, err := s.obj.GetObjectInfo(r.Context(), bucket, key, object.ObjectOptions{}); err != nil {
+			writeErrorResponse(w, r, ErrPreconditionFailed, "/"+bucket+"/"+key)
+			return
+		} else if im != "*" && !etagMatches(im, strings.Trim(cur.ETag, `"`)) {
+			writeErrorResponse(w, r, ErrPreconditionFailed, "/"+bucket+"/"+key)
+			return
+		}
+		opts.CheckPrecondFn = func(oi object.ObjectInfo) bool {
+			return im != "*" && !etagMatches(im, strings.Trim(oi.ETag, `"`))
+		}
 	}
 
 	oi, err := s.obj.PutObject(r.Context(), bucket, key, object.NewPutObjReader(r.Body, size, size), opts)
