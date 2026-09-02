@@ -33,8 +33,9 @@ func requestIDFrom(r *http.Request) string {
 // statusRecorder captures the response status for access logging.
 type statusRecorder struct {
 	http.ResponseWriter
-	status int
-	bytes  int
+	status    int
+	bytes     int
+	accessKey string // filled by handleS3 once the caller is known
 }
 
 func (s *statusRecorder) WriteHeader(code int) {
@@ -90,11 +91,19 @@ func withAccessLog(next http.Handler) http.Handler {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w}
 		next.ServeHTTP(rec, r)
+		dur := time.Since(start)
 		inBytes := r.ContentLength
 		if inBytes < 0 {
 			inBytes = 0
 		}
 		metrics.Record(r.Method, rec.status, inBytes, int64(rec.bytes))
+		if !isInternalPath(r.URL.Path) {
+			activity.add(activityEntry{
+				Time: start.UTC(), Method: r.Method, Path: r.URL.Path,
+				Status: rec.status, Bytes: rec.bytes, DurMS: dur.Milliseconds(),
+				IP: clientIP(r), Access: rec.accessKey, ReqID: requestIDFrom(r),
+			})
+		}
 		logger.Info("s3 request",
 			"method", r.Method,
 			"path", r.URL.Path,

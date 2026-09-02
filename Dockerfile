@@ -28,7 +28,7 @@ COPY --from=build /out/gostore /usr/local/bin/gostore
 COPY --from=build /out/data /data
 
 # S3 API + web console.
-EXPOSE 9000 9001
+EXPOSE 9000 9001 80 443
 VOLUME ["/data"]
 
 ENV GOSTORE_ADDRESS=":9000" \

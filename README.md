@@ -216,6 +216,13 @@ requests sem assinatura — só debug), `GOSTORE_KMS_MASTER_KEY` (base64 de 32
 bytes; senão é gerada em `.gostore.sys/kms/master.key`), `GOSTORE_SCAN_INTERVAL`
 (ex. `30m`; default `1h`), `GOSTORE_DISABLE_SELFTEST=1`.
 
+**HTTPS embutido (Let's Encrypt):** `GOSTORE_TLS_DOMAIN=s3.exemplo.com`
+(+ `GOSTORE_ADDRESS=:443`, e expõe a porta 80 pro desafio ACME) → o gostore
+pega e renova o próprio certificado, sem nginx/Caddy na frente. Cert em
+`<volume>/.gostore.sys/acme/`. Opcionais: `GOSTORE_TLS_EMAIL`,
+`GOSTORE_TLS_HTTP_ADDR` (padrão `:80`). `GOSTORE_METRICS_TOKEN` protege
+`/gostore/metrics` com bearer.
+
 `GOSTORE_NO_CONTENT_TYPE_SNIFF=1` desliga o palpite de Content-Type pela
 extensão da key quando o cliente não manda nenhum (ou manda
 `application/octet-stream`) — por padrão o gostore preenche (`.mp4` →

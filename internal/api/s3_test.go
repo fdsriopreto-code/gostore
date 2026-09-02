@@ -876,3 +876,23 @@ func TestObjectPreviewThumbnail(t *testing.T) {
 	}
 	r2.Body.Close()
 }
+
+func TestActivityFeed(t *testing.T) {
+	srv := newTestServer(t)
+	_ = do(t, srv, http.MethodPut, "/afeed", []byte{}, nil)
+	_ = do(t, srv, http.MethodGet, "/", nil, nil)
+	// health/metrics should NOT appear in the feed
+	http.Get(srv.URL + "/gostore/health/live")
+
+	r := doAs(t, srv, testAK, testSK, http.MethodGet, "/gostore/admin/v1/activity?limit=10", nil)
+	body := readBody(t, r)
+	if r.StatusCode != 200 {
+		t.Fatalf("activity: %d %s", r.StatusCode, body)
+	}
+	if !strings.Contains(body, `"method":"PUT"`) || !strings.Contains(body, `"path":"/afeed"`) {
+		t.Fatalf("activity feed missing the PUT: %s", body)
+	}
+	if strings.Contains(body, "/gostore/health/") {
+		t.Fatalf("activity feed should not include health checks: %s", body)
+	}
+}

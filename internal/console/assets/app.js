@@ -336,8 +336,12 @@ const DOC_GROUPS = ["Get started", "Access control", "Data management", "Referen
 
 let lastConsoleRoute = "dashboard";
 
+let pollTimers = [];
+function stopPolls() { pollTimers.forEach(clearInterval); pollTimers = []; }
+
 async function render() {
   if (thumbObs) { thumbObs.disconnect(); thumbObs = null; }
+  stopPolls();
   renderNav();
   $("#sidenav").classList.remove("open");
   const v = $("#view");
@@ -944,6 +948,35 @@ async function viewMonitoring(v) {
   v.append(el("p", { class: "muted small", style: "margin-top:14px" },
     "Prometheus metrics: ", el("code", {}, location.origin + "/gostore/metrics"),
     " (open by default; set ", el("code", {}, "GOSTORE_METRICS_TOKEN"), " to require a bearer token)."));
+
+  // Live request feed — no external audit sink needed.
+  v.append(el("h3", { style: "margin:26px 0 8px;font-size:15px" }, "Recent requests"));
+  const feed = el("div", { class: "card", style: "overflow:auto;max-height:420px" });
+  v.append(feed);
+  const loadFeed = async () => {
+    let rows;
+    try { rows = await (await api("GET", "/gostore/admin/v1/activity", { query: { limit: "60" } })).json(); }
+    catch { return; }
+    if (!Array.isArray(rows)) return;
+    const tb = el("tbody");
+    for (const e of rows) {
+      const cls = e.status >= 500 ? "warn" : e.status >= 400 ? "warn" : "ok";
+      tb.append(el("tr", {},
+        el("td", { class: "muted", style: "white-space:nowrap" }, new Date(e.time).toLocaleTimeString()),
+        el("td", {}, el("span", { class: "pill" }, e.method)),
+        el("td", {}, el("code", { style: "font-size:11.5px" }, e.path)),
+        el("td", {}, el("span", { class: "pill " + cls }, String(e.status))),
+        el("td", { class: "num muted" }, e.bytes ? fmtSize(e.bytes) : ""),
+        el("td", { class: "muted", style: "white-space:nowrap" }, e.durMs + " ms"),
+        el("td", { class: "muted" }, e.accessKey || "anon"),
+        el("td", { class: "muted" }, e.ip || "")));
+    }
+    feed.innerHTML = "";
+    feed.append(el("table", {}, el("thead", {}, el("tr", {},
+      ...["Time", "Method", "Path", "Status", "Size", "Took", "Key", "IP"].map((h) => el("th", {}, h)))), tb));
+  };
+  await loadFeed();
+  pollTimers.push(setInterval(loadFeed, 4000));
   const row = el("div", { class: "toolbar" });
   row.append(el("button", { onclick: async (e) => {
     e.target.disabled = true;
@@ -1019,7 +1052,7 @@ const DOCS = [
       ["Access key", `<code>${x.ak}</code> (this session)`],
       ["Secret key", "the one you signed in with — the console never displays it"],
     ]));
-    c.append(callout("HTTPS", "Put a TLS terminator (Caddy, nginx, your PaaS) in front of the API for production. SDKs will refuse to send credentials over plain HTTP unless you explicitly allow it.", "warn"));
+    c.append(callout("HTTPS", "For production either put a TLS terminator (Caddy, nginx, your PaaS) in front, or let gostore do it: set <code>GOSTORE_TLS_DOMAIN=your.host</code> and <code>GOSTORE_ADDRESS=:443</code> and it fetches + renews a Let's Encrypt cert itself (see the Server configuration doc). SDKs refuse to send credentials over plain HTTP.", "warn"));
     c.append(el("h3", {}, "2. Create a bucket and upload"));
     c.append(P("From this console: Buckets → Create bucket, then open it and drag files (or a whole folder) in — files over 16&nbsp;MiB upload as a multipart transfer (parts in parallel, each retried on failure); a dropped folder keeps its structure as key prefixes. Open any object → <b>Preview</b> to play video/audio (streamed via range requests) or view images, PDFs and text inline. From the CLI:"));
     c.append(codeBlock(
@@ -1359,6 +1392,7 @@ new PutObjectCommand({ Bucket: "b", Key: "k", Body: buf, ServerSideEncryption: "
       ["POST /gostore/admin/v1/heal", "—", "reconstruct missing/corrupt shards (erasure)"],
       ["POST /gostore/admin/v1/scanner/run", "—", "run one scan pass now (lifecycle + usage + heal sample)"],
       ["GET /gostore/admin/v1/datausage", "—", "per-bucket object counts &amp; byte totals from the last scan"],
+      ["GET /gostore/admin/v1/activity?limit=N", "—", "last N HTTP requests (method, path, status, key, IP) — no external audit sink needed"],
       ["GET /gostore/admin/v1/pool", "—", "erasure-set layout + any running decommission/rebalance"],
       ["POST /gostore/admin/v1/pool/decommission?set=N", "—", "drain set N onto the others, then it can be removed"],
       ["POST /gostore/admin/v1/pool/rebalance", "—", "relocate objects that no longer hash to the set they live on"],
@@ -1441,6 +1475,14 @@ GOSTORE_CLUSTER_SELF=http://node2:9000 gostore server \\
       ["GOSTORE_MRF_INTERVAL", "5m", "cadence of the partial-write re-heal worker"],
       ["GOSTORE_LIST_CACHE_TTL", "15s", "per-bucket listing cache lifetime; <code>0</code> disables (re-walk every page)"],
     ]));
+    c.append(el("h3", {}, "Built-in HTTPS (Let's Encrypt)"));
+    c.append(P("Set <code>GOSTORE_TLS_DOMAIN</code> and gostore obtains and renews its own certificate — no nginx/Caddy in front. Point <code>GOSTORE_ADDRESS</code> at <code>:443</code>, publish port 80 as well (ACME HTTP-01 challenge + a redirect to https). MinIO can't do this."));
+    c.append(TBL(["Variable", "Purpose"], [
+      ["GOSTORE_TLS_DOMAIN", "comma-list of hostnames to get a cert for (e.g. <code>s3.example.com</code>)"],
+      ["GOSTORE_TLS_EMAIL", "optional ACME account email (renewal notices)"],
+      ["GOSTORE_TLS_HTTP_ADDR", "address for the ACME challenge / redirect listener (default <code>:80</code>)"],
+    ]));
+    c.append(callout("Certs are cached", "under <code>&lt;volume&gt;/.gostore.sys/acme/</code>, so they persist across restarts. Keep that volume persistent (see above) or you'll re-issue on every deploy and hit Let's Encrypt rate limits.", "warn"));
     c.append(el("h3", {}, "Cluster"));
     c.append(TBL(["Variable", "Purpose"], [
       ["GOSTORE_CLUSTER_SELF", "this node's own base URL, e.g. <code>http://node1:9000</code>"],

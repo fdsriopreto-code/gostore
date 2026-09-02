@@ -122,6 +122,9 @@ func (s *Server) handleS3(w http.ResponseWriter, r *http.Request) {
 		r.Body = newBody
 	}
 	r = r.WithContext(context.WithValue(r.Context(), ctxKeyAccessKey{}, accessKey))
+	if sr, ok := w.(*statusRecorder); ok {
+		sr.accessKey = accessKey
+	}
 
 	// STS AssumeRole is allowed for any authenticated caller, ahead of authz.
 	if req.Bucket == "" && isSTSRequest(r) {

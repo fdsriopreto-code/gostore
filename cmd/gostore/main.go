@@ -12,17 +12,21 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/crypto/acme/autocert"
 
 	"github.com/lojadopocket/gostore/internal/api"
 	"github.com/lojadopocket/gostore/internal/bucketcfg"
@@ -41,7 +45,9 @@ import (
 	"github.com/lojadopocket/gostore/internal/storage"
 )
 
-var version = "0.3.0-m3"
+// version is overridden at build time (-X main.version); this default is
+// used for local `go run` / `go build`.
+var version = "0.9.0"
 
 func main() {
 	metrics.SetVersion(version)
@@ -314,13 +320,35 @@ func serve(cfg config.Config, obj object.Layer, clusterRPC http.Handler) error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	errCh := make(chan error, 2)
+	// Optional built-in HTTPS: GOSTORE_TLS_DOMAIN=host[,host] makes gostore
+	// obtain and renew a Let's Encrypt cert itself — no reverse proxy needed.
+	acmeCache := ""
+	if len(cfg.Volumes) > 0 {
+		acmeCache = filepath.Join(cfg.Volumes[0], ".gostore.sys", "acme")
+	}
+	challengeSrv, tlsOn := setupAutoTLS(apiSrv, acmeCache)
+
+	errCh := make(chan error, 3)
 	go func() {
+		if tlsOn {
+			logger.Info("S3 API listening (HTTPS)", "addr", cfg.Address)
+			if err := apiSrv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- fmt.Errorf("api server (tls): %w", err)
+			}
+			return
+		}
 		logger.Info("S3 API listening", "addr", cfg.Address)
 		if err := apiSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- fmt.Errorf("api server: %w", err)
 		}
 	}()
+	if challengeSrv != nil {
+		go func() {
+			if err := challengeSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- fmt.Errorf("acme http listener: %w", err)
+			}
+		}()
+	}
 	go func() {
 		logger.Info("console listening", "addr", cfg.ConsoleAddress)
 		if err := consoleSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -342,11 +370,57 @@ func serve(cfg config.Config, obj object.Layer, clusterRPC http.Handler) error {
 	defer cancel()
 	_ = apiSrv.Shutdown(shutdownCtx)
 	_ = consoleSrv.Shutdown(shutdownCtx)
+	if challengeSrv != nil {
+		_ = challengeSrv.Shutdown(shutdownCtx)
+	}
 	if err := obj.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("backend shutdown: %w", err)
 	}
 	logger.Info("stopped cleanly")
 	return nil
+}
+
+// setupAutoTLS enables built-in Let's Encrypt when GOSTORE_TLS_DOMAIN is set.
+// It points apiSrv at an autocert TLS config and returns a small HTTP server
+// (default :80, override GOSTORE_TLS_HTTP_ADDR) that answers ACME HTTP-01
+// challenges and redirects everything else to https. Certs are cached under
+// <volume>/.gostore.sys/acme so they survive restarts.
+func setupAutoTLS(apiSrv *http.Server, cacheDir string) (challenge *http.Server, enabled bool) {
+	var domains []string
+	for _, d := range strings.Split(os.Getenv("GOSTORE_TLS_DOMAIN"), ",") {
+		if d = strings.TrimSpace(d); d != "" {
+			domains = append(domains, d)
+		}
+	}
+	if len(domains) == 0 {
+		return nil, false
+	}
+	if cacheDir == "" {
+		cacheDir = "./.gostore-acme"
+	}
+	_ = os.MkdirAll(cacheDir, 0o700)
+	m := &autocert.Manager{
+		Cache:      autocert.DirCache(cacheDir),
+		Prompt:     autocert.AcceptTOS,
+		HostPolicy: autocert.HostWhitelist(domains...),
+		Email:      os.Getenv("GOSTORE_TLS_EMAIL"),
+	}
+	tlsCfg := m.TLSConfig()
+	tlsCfg.MinVersion = tls.VersionTLS12
+	apiSrv.TLSConfig = tlsCfg
+
+	httpAddr := os.Getenv("GOSTORE_TLS_HTTP_ADDR")
+	if httpAddr == "" {
+		httpAddr = ":80"
+	}
+	challenge = &http.Server{
+		Addr:              httpAddr,
+		Handler:           m.HTTPHandler(nil),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	logger.Info("auto-HTTPS enabled (Let's Encrypt)",
+		"domains", domains, "challengeAddr", httpAddr, "certCache", cacheDir)
+	return challenge, true
 }
 
 // applyInlineMax honours GOSTORE_INLINE_MAX (bytes; 0 disables inlining) for
