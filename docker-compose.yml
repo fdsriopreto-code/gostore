@@ -11,7 +11,7 @@ services:
     build:
       context: .
       args:
-        VERSION: "0.3.0-m3"
+        VERSION: "0.9.0"
     image: gostore:local
     restart: unless-stopped
     ports:

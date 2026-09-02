@@ -9,7 +9,7 @@ COPY go.mod go.sum* ./
 RUN go mod download
 
 COPY . .
-ARG VERSION=dev
+ARG VERSION=0.9.0
 RUN CGO_ENABLED=0 GOOS=linux go build \
       -trimpath \
       -ldflags "-s -w -X main.version=${VERSION}" \
