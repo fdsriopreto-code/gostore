@@ -1,98 +1,78 @@
 "use strict";
-/* gostore console — dependency-free SPA. Every request is AWS SigV4 signed in
-   the browser with Web Crypto, same-origin with the S3 + admin API. */
+/* gostore console — dependency-free SPA. Every S3/admin request is AWS SigV4
+   signed in the browser with Web Crypto, same-origin with the API. */
 
 const REGION = "us-east-1";
 const te = new TextEncoder();
 
-// ---------- crypto / SigV4 ---------------------------------------------------
-
+/* ============================ crypto / SigV4 ============================ */
 async function hmac(key, msg) {
   const k = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   return new Uint8Array(await crypto.subtle.sign("HMAC", k, typeof msg === "string" ? te.encode(msg) : msg));
 }
-const hexstr = (b) => [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, "0")).join("");
-const sha256hex = async (s) => hexstr(await crypto.subtle.digest("SHA-256", te.encode(s)));
+const hx = (b) => [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, "0")).join("");
+const sha256hex = async (s) => hx(await crypto.subtle.digest("SHA-256", te.encode(s)));
 async function signingKey(secret, ds) {
   let k = te.encode("AWS4" + secret);
   for (const p of [ds, REGION, "s3", "aws4_request"]) k = await hmac(k, p);
   return k;
 }
-const encComp = (s) =>
-  encodeURIComponent(s).replace(/[!*'()]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase());
-const encPath = (p) => p.split("/").map(encComp).join("/");
-const canonQuery = (q) =>
-  Object.keys(q).sort().map((k) => encComp(k) + "=" + encComp(q[k] ?? "")).join("&");
+const encC = (s) => encodeURIComponent(s).replace(/[!*'()]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase());
+const encP = (p) => p.split("/").map(encC).join("/");
+const canonQ = (q) => Object.keys(q).sort().map((k) => encC(k) + "=" + encC(q[k] ?? "")).join("&");
 
 const session = {
   get ak() { return sessionStorage.getItem("gs_ak") || ""; },
   get sk() { return sessionStorage.getItem("gs_sk") || ""; },
-  set(ak, sk) { sessionStorage.setItem("gs_ak", ak); sessionStorage.setItem("gs_sk", sk); },
+  set(a, s) { sessionStorage.setItem("gs_ak", a); sessionStorage.setItem("gs_sk", s); },
   clear() { sessionStorage.clear(); },
 };
 
 async function sign(method, path, { query = {}, contentType, extraHeaders = {} } = {}) {
   const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, "");
-  const ds = amzDate.slice(0, 8);
-  const host = location.host;
-  const payloadHash = "UNSIGNED-PAYLOAD";
-  const hdr = { "x-amz-date": amzDate, "x-amz-content-sha256": payloadHash, ...extraHeaders };
+  const ds = amzDate.slice(0, 8), host = location.host, ph = "UNSIGNED-PAYLOAD";
+  const hdr = { "x-amz-date": amzDate, "x-amz-content-sha256": ph, ...extraHeaders };
   if (contentType) hdr["content-type"] = contentType;
   const signed = [...Object.keys(hdr).map((h) => h.toLowerCase()), "host"].sort();
-  const canonHeaders = signed
-    .map((h) => h + ":" + (h === "host" ? host : String(hdr[h]).trim()) + "\n").join("");
-  const cr = [method, encPath(path), canonQuery(query), canonHeaders, signed.join(";"), payloadHash].join("\n");
+  const ch = signed.map((h) => h + ":" + (h === "host" ? host : String(hdr[h]).trim()) + "\n").join("");
+  const cr = [method, encP(path), canonQ(query), ch, signed.join(";"), ph].join("\n");
   const scope = `${ds}/${REGION}/s3/aws4_request`;
   const sts = ["AWS4-HMAC-SHA256", amzDate, scope, await sha256hex(cr)].join("\n");
-  const sig = hexstr(await hmac(await signingKey(session.sk, ds), sts));
-  hdr["Authorization"] =
-    `AWS4-HMAC-SHA256 Credential=${session.ak}/${scope}, SignedHeaders=${signed.join(";")}, Signature=${sig}`;
-  const qs = canonQuery(query);
-  return { url: location.origin + encPath(path) + (qs ? "?" + qs : ""), headers: hdr };
+  const sig = hx(await hmac(await signingKey(session.sk, ds), sts));
+  hdr["Authorization"] = `AWS4-HMAC-SHA256 Credential=${session.ak}/${scope}, SignedHeaders=${signed.join(";")}, Signature=${sig}`;
+  const qs = canonQ(query);
+  return { url: location.origin + encP(path) + (qs ? "?" + qs : ""), headers: hdr };
 }
-
 async function api(method, path, opts = {}) {
   const { url, headers } = await sign(method, path, opts);
   return fetch(url, { method, headers, body: opts.body });
 }
-
-// signed XHR — used for uploads so we get progress events
 async function upload(path, file, onProgress) {
-  const { url, headers } = await sign("PUT", "/" + path, {
-    contentType: file.type || "application/octet-stream",
-  });
-  return new Promise((resolve, reject) => {
+  const { url, headers } = await sign("PUT", "/" + path, { contentType: file.type || "application/octet-stream" });
+  return new Promise((res, rej) => {
     const x = new XMLHttpRequest();
     x.open("PUT", url);
     for (const [k, v] of Object.entries(headers)) x.setRequestHeader(k, v);
     x.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
-    x.onload = () => (x.status < 300 ? resolve() : reject(new Error(extractErr(x.responseText, x.status))));
-    x.onerror = () => reject(new Error("network error"));
+    x.onload = () => (x.status < 300 ? res() : rej(new Error(exErr(x.responseText, x.status))));
+    x.onerror = () => rej(new Error("network error"));
     x.send(file);
   });
 }
-
-// presigned GET URL for sharing
 async function presignGet(path, expires = 3600) {
   const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, "");
-  const ds = amzDate.slice(0, 8);
-  const scope = `${ds}/${REGION}/s3/aws4_request`;
+  const ds = amzDate.slice(0, 8), scope = `${ds}/${REGION}/s3/aws4_request`;
   const q = {
-    "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
-    "X-Amz-Credential": `${session.ak}/${scope}`,
-    "X-Amz-Date": amzDate,
-    "X-Amz-Expires": String(expires),
-    "X-Amz-SignedHeaders": "host",
+    "X-Amz-Algorithm": "AWS4-HMAC-SHA256", "X-Amz-Credential": `${session.ak}/${scope}`,
+    "X-Amz-Date": amzDate, "X-Amz-Expires": String(expires), "X-Amz-SignedHeaders": "host",
   };
-  const canonHeaders = "host:" + location.host + "\n";
-  const cr = ["GET", encPath("/" + path), canonQuery(q), canonHeaders, "host", "UNSIGNED-PAYLOAD"].join("\n");
+  const cr = ["GET", encP("/" + path), canonQ(q), "host:" + location.host + "\n", "host", "UNSIGNED-PAYLOAD"].join("\n");
   const sts = ["AWS4-HMAC-SHA256", amzDate, scope, await sha256hex(cr)].join("\n");
-  q["X-Amz-Signature"] = hexstr(await hmac(await signingKey(session.sk, ds), sts));
-  return location.origin + encPath("/" + path) + "?" + canonQuery(q);
+  q["X-Amz-Signature"] = hx(await hmac(await signingKey(session.sk, ds), sts));
+  return location.origin + encP("/" + path) + "?" + canonQ(q);
 }
 
-// ---------- dom helpers --------------------------------------------------
-
+/* ============================ dom helpers ============================ */
 const $ = (s, r = document) => r.querySelector(s);
 const el = (tag, props = {}, ...kids) => {
   const n = document.createElement(tag);
@@ -106,28 +86,39 @@ const el = (tag, props = {}, ...kids) => {
   for (const c of kids.flat()) if (c != null) n.append(c.nodeType ? c : document.createTextNode(c));
   return n;
 };
-const ic = (d, w = 2) =>
-  el("span", { class: "iconwrap", html:
-    `<svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${w}" stroke-linecap="round" stroke-linejoin="round">${d}</svg>` }).firstChild;
+const ic = (d) => {
+  const s = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  s.setAttribute("class", "i"); s.setAttribute("viewBox", "0 0 24 24");
+  s.setAttribute("fill", "none"); s.setAttribute("stroke", "currentColor");
+  s.setAttribute("stroke-linecap", "round"); s.setAttribute("stroke-linejoin", "round");
+  s.innerHTML = d; return s;
+};
 const ICON = {
-  bucket: '<path d="M5 7h14l-1.5 12.5A2 2 0 0 1 15.5 21h-7a2 2 0 0 1-2-1.5L5 7z"/><path d="M8 7V5a4 4 0 0 1 8 0v2"/>',
+  dash: '<rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="5" rx="1.5"/><rect x="13" y="12" width="8" height="9" rx="1.5"/><rect x="3" y="15" width="8" height="6" rx="1.5"/>',
+  bucket: '<path d="M5 8h14l-1.6 12.5A2 2 0 0 1 15.4 22H8.6a2 2 0 0 1-2-1.5L5 8z"/><path d="M8 8V6a4 4 0 0 1 8 0v2"/>',
+  key: '<circle cx="8" cy="15" r="4"/><path d="M10.8 12.2 20 3M17 6l2 2M15 8l2 2"/>',
+  gauge: '<path d="M12 13 16 9"/><path d="M4.5 18a9 9 0 1 1 15 0"/><circle cx="12" cy="13" r="1.4" fill="currentColor"/>',
+  book: '<path d="M4 5a2 2 0 0 1 2-2h12v16H6a2 2 0 0 0-2 2z"/><path d="M4 19a2 2 0 0 0 2 2h12"/>',
   folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
   file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',
-  up: '<path d="M12 19V5M5 12l7-7 7 7"/>',
-  down: '<path d="M12 5v14M19 12l-7 7-7-7"/>',
+  up: '<path d="M12 19V5M5 12l7-7 7 7"/>', down: '<path d="M12 5v14M19 12l-7 7-7-7"/>',
   trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3"/>',
-  plus: '<path d="M12 5v14M5 12h14"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>', copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',
   link: '<path d="M10 13a5 5 0 0 0 7 0l2-2a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-2 2a5 5 0 0 0 7 7l1-1"/>',
-  copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',
-  gear: '<circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.6-2-3.4-2.3 1a7 7 0 0 0-1.7-1l-.3-2.5h-4l-.3 2.5a7 7 0 0 0-1.7 1l-2.3-1-2 3.4 2 1.6a7 7 0 0 0 0 2l-2 1.6 2 3.4 2.3-1a7 7 0 0 0 1.7 1l.3 2.5h4l.3-2.5a7 7 0 0 0 1.7-1l2.3 1 2-3.4-2-1.6a7 7 0 0 0 .1-1z"/>',
-  search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
-  refresh: '<path d="M21 12a9 9 0 1 1-3-6.7M21 4v5h-5"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>', refresh: '<path d="M21 12a9 9 0 1 1-3-6.7M21 4v5h-5"/>',
+  chev: '<path d="M9 6l6 6-6 6"/>', ext: '<path d="M14 4h6v6M20 4l-9 9M18 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h6"/>',
+  layers: '<path d="M12 3 2 8l10 5 10-5z"/><path d="M2 13l10 5 10-5M2 18l10 5 10-5"/>',
+  lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>', branch: '<circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="9" r="2.5"/><path d="M6 8.5v7M6 15.5A9 9 0 0 0 15 9"/>',
+  shield: '<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/>', term: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/>',
+  code: '<path d="M8 6l-6 6 6 6M16 6l6 6-6 6M13 4l-2 16"/>',
+  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>', gear: '<circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.6-2-3.4-2.3 1a7 7 0 0 0-1.7-1L14.6 2h-5l-.6 2.5a7 7 0 0 0-1.7 1l-2.3-1-2 3.4L3 10.9a7 7 0 0 0 0 2.2L1 14.7l2 3.4 2.3-1a7 7 0 0 0 1.7 1L9.6 22h5l.6-2.5a7 7 0 0 0 1.7-1l2.3 1 2-3.4-2-1.6a7 7 0 0 0 .1-1.1z"/>',
 };
 
 function toast(msg, kind = "") {
   const t = el("div", { class: kind }, msg);
   $("#toast").append(t);
-  setTimeout(() => { t.style.opacity = "0"; setTimeout(() => t.remove(), 200); }, kind === "err" ? 6000 : 3200);
+  setTimeout(() => { t.style.opacity = "0"; setTimeout(() => t.remove(), 200); }, kind === "err" ? 6500 : 3200);
 }
 const fmtSize = (n) => {
   if (n == null || n === "") return "";
@@ -139,187 +130,268 @@ const fmtDate = (s) => (s ? new Date(s).toLocaleString() : "");
 const relTime = (s) => {
   if (!s) return "";
   const d = (Date.now() - new Date(s)) / 1000;
-  if (d < 60) return "just now";
-  if (d < 3600) return Math.floor(d / 60) + "m ago";
-  if (d < 86400) return Math.floor(d / 3600) + "h ago";
-  if (d < 2592000) return Math.floor(d / 86400) + "d ago";
+  if (d < 60) return "just now"; if (d < 3600) return Math.floor(d / 60) + "m ago";
+  if (d < 86400) return Math.floor(d / 3600) + "h ago"; if (d < 2592000) return Math.floor(d / 86400) + "d ago";
   return new Date(s).toLocaleDateString();
 };
 const parseXml = (s) => new DOMParser().parseFromString(s, "application/xml");
-function extractErr(body, status) {
+function exErr(body, status) {
   const m = (body || "").match(/<Message>([^<]+)<\/Message>/) || (body || "").match(/"error"\s*:\s*"([^"]+)"/);
   return m ? m[1] : `HTTP ${status}`;
 }
 async function must(resp) {
-  if (!resp.ok && !(resp.status === 204)) throw new Error(extractErr(await resp.text(), resp.status));
+  if (!resp.ok && resp.status !== 204) throw new Error(exErr(await resp.text(), resp.status));
   return resp;
 }
-function copyText(t) {
-  navigator.clipboard?.writeText(t).then(() => toast("Copied", "ok"), () => toast("Copy failed", "err"));
-}
+function copyText(t) { navigator.clipboard?.writeText(t).then(() => toast("Copied", "ok"), () => toast("Copy failed", "err")); }
 
+/* ---------- code block with mini highlighter ---------- */
+function hl(code, lang) {
+  const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  let s = esc(code);
+  if (lang === "json") {
+    s = s.replace(/("(?:\\.|[^"\\])*")(\s*:)?/g, (_, str, colon) => colon ? `<span class="tok-f">${str}</span>${colon}` : `<span class="tok-s">${str}</span>`)
+         .replace(/\b(true|false|null)\b/g, '<span class="tok-k">$1</span>')
+         .replace(/(-?\d+\.?\d*)/g, '<span class="tok-n">$1</span>');
+  } else if (lang === "xml") {
+    s = s.replace(/(&lt;\/?)([\w:-]+)/g, '$1<span class="tok-f">$2</span>').replace(/([\w:-]+)=(&quot;.*?&quot;|".*?")/g, '<span class="tok-n">$1</span>=<span class="tok-s">$2</span>');
+  } else if (lang === "bash" || lang === "sh") {
+    s = s.replace(/(#.*)$/gm, '<span class="tok-c">$1</span>')
+         .replace(/('(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*")/g, '<span class="tok-s">$1</span>')
+         .replace(/\b(aws|mc|curl|export|gostore)\b/g, '<span class="tok-k">$1</span>')
+         .replace(/(--?[a-z][\w-]*)/g, '<span class="tok-n">$1</span>');
+  } else {
+    s = s.replace(/(\/\/.*|#.*)$/gm, '<span class="tok-c">$1</span>')
+         .replace(/('(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|`(?:\\.|[^`\\])*`)/g, '<span class="tok-s">$1</span>')
+         .replace(/\b(const|let|var|func|import|from|return|new|async|await|package|type|struct|if|else|for|def|class|with|as)\b/g, '<span class="tok-k">$1</span>')
+         .replace(/\b([A-Z]\w+)\b/g, '<span class="tok-f">$1</span>');
+  }
+  return s;
+}
+function codeBlock(code, lang = "bash", label) {
+  const wrap = el("div", { class: "code" });
+  const bar = el("div", { class: "bar" },
+    el("span", { class: "lang" }, label || lang),
+    el("button", { onclick: () => copyText(code) }, "Copy"));
+  const pre = el("pre");
+  pre.innerHTML = hl(code.trim(), lang);
+  wrap.append(bar, pre);
+  return wrap;
+}
+const callout = (title, body, kind = "") => el("div", { class: "callout " + kind }, title ? el("b", {}, title) : null, body);
+
+/* ---------- modal ---------- */
 function modal(title, hint, fields, onOK, okLabel = "Create") {
   const d = $("#modal"); d.innerHTML = "";
   d.append(el("h3", {}, title));
   if (hint) d.append(el("p", { class: "hint" }, hint));
   const inp = {};
   for (const f of fields) {
-    d.append(el("label", {}, f.label));
+    d.append(el("label", { class: "field-label" }, f.label));
     let n;
     if (f.type === "select") { n = el("select"); for (const o of f.options) n.append(el("option", { value: o.value ?? o }, o.label ?? o)); n.value = f.value ?? ""; }
     else if (f.type === "textarea") n = el("textarea", {}, f.value ?? "");
     else n = el("input", { type: f.type === "password" ? "password" : "text", value: f.value ?? "", spellcheck: "false", readonly: f.readonly ? "" : null });
     inp[f.name] = n; d.append(n);
   }
-  const row = el("div", { class: "row" });
-  row.append(el("button", { class: "ghost", onclick: () => d.close() }, "Cancel"));
+  const btns = el("div", { class: "btns" });
+  btns.append(el("button", { class: "ghost", onclick: () => d.close() }, "Cancel"));
   const ok = el("button", { class: "primary" }, okLabel);
-  ok.addEventListener("click", async () => {
+  ok.onclick = async () => {
     const v = {}; for (const k in inp) v[k] = inp[k].value.trim();
-    ok.disabled = true; ok.textContent = "…";
-    try { await onOK(v); d.close(); } catch (e) { toast(e.message, "err"); }
-    finally { ok.disabled = false; ok.textContent = okLabel; }
-  });
-  row.append(ok); d.append(row); d.showModal();
+    ok.disabled = true;
+    try { await onOK(v); d.close(); } catch (e) { toast(e.message, "err"); } finally { ok.disabled = false; }
+  };
+  btns.append(ok); d.append(btns); d.showModal();
   setTimeout(() => d.querySelector("input,textarea,select")?.focus(), 30);
 }
 
-// ---------- drawer ----------------------------------------------------
-
+/* ---------- drawer ---------- */
 function closeDrawer() { $("#drawer").classList.remove("on"); $("#scrim").classList.remove("on"); }
-$("#scrim").addEventListener("click", closeDrawer);
-document.addEventListener("keydown", (e) => e.key === "Escape" && closeDrawer());
+$("#scrim").onclick = closeDrawer;
+addEventListener("keydown", (e) => e.key === "Escape" && closeDrawer());
+function openDrawer(build) { const d = $("#drawer"); d.innerHTML = ""; build(d); d.classList.add("on"); $("#scrim").classList.add("on"); }
 
-function openDrawer(build) {
-  const d = $("#drawer"); d.innerHTML = "";
-  build(d);
-  d.classList.add("on"); $("#scrim").classList.add("on");
-}
+/* ============================ routing ============================ */
+const NAV = [
+  { group: "", items: [
+    { id: "dashboard", title: "Dashboard", icon: ICON.dash },
+    { id: "buckets", title: "Buckets", icon: ICON.bucket },
+    { id: "keys", title: "Access Keys", icon: ICON.key },
+    { id: "monitoring", title: "Monitoring", icon: ICON.gauge },
+  ]},
+];
+let SERVER = {}; // filled from admin/v1/info
 
-// ---------- state / routing -----------------------------------------
+function route() { return (location.hash.replace(/^#\/?/, "") || "dashboard"); }
+function go(r) { location.hash = "#/" + r; }
 
-const state = { view: "buckets", bucket: null, prefix: "", tab: "objects" };
-const main = () => $("#main");
-
-function crumbs() {
-  const c = $("#crumbs"); c.innerHTML = "";
-  if (state.view !== "buckets" || !state.bucket) {
-    c.append(el("span", { class: "cur" }, { buckets: "Buckets", identity: "Access Keys", info: "Monitoring" }[state.view]));
-    return;
+function renderNav() {
+  const box = $("#navlinks"); box.innerHTML = "";
+  const cur = route();
+  for (const g of NAV) {
+    if (g.group) box.append(el("div", { class: "grp" }, g.group));
+    for (const it of g.items) {
+      const a = el("a", { class: (cur === it.id || (it.id !== "dashboard" && cur.startsWith(it.id)) ? "active" : "") },
+        ic(it.icon), it.title);
+      a.onclick = () => go(it.id);
+      box.append(a);
+    }
   }
-  const link = (label, fn) => { const a = el("a", { href: "#" }, label); a.onclick = (e) => { e.preventDefault(); fn(); }; return a; };
-  c.append(link("Buckets", () => { state.bucket = null; render(); }));
-  c.append(ic('<path d="M9 6l6 6-6 6"/>'));
-  c.append(link(state.bucket, () => { state.prefix = ""; state.tab = "objects"; render(); }));
-  let acc = "";
-  for (const seg of state.prefix.split("/").filter(Boolean)) {
-    acc += seg + "/"; const a = acc;
-    c.append(ic('<path d="M9 6l6 6-6 6"/>'));
-    c.append(link(seg, () => { state.prefix = a; render(); }));
+  box.append(el("div", { class: "grp" }, "Documentation"));
+  const dcur = cur.startsWith("docs/") ? cur.slice(5) : "";
+  for (const d of DOCS) {
+    const a = el("a", { class: (dcur === d.id ? "active" : "") }, ic(d.icon || ICON.book), d.title);
+    a.onclick = () => go("docs/" + d.id);
+    box.append(a);
   }
-}
-
-function setView(v) {
-  state.view = v; state.bucket = null;
-  for (const a of document.querySelectorAll("nav a[data-view]")) a.classList.toggle("active", a.dataset.view === v);
-  render();
 }
 
 async function render() {
-  crumbs();
-  main().innerHTML = "";
-  main().append(el("div", { class: "empty" }, el("span", { class: "spin" })));
+  renderNav();
+  $("#sidenav").classList.remove("open");
+  const v = $("#view");
+  v.innerHTML = ""; v.className = "wrap";
+  v.append(el("div", { class: "empty" }, el("span", { class: "spin" })));
+  const r = route();
   try {
-    if (state.view === "buckets" && !state.bucket) await viewBuckets();
-    else if (state.view === "buckets") await viewBucket();
-    else if (state.view === "identity") await viewIdentity();
-    else if (state.view === "info") await viewInfo();
+    if (r === "dashboard") await viewDashboard(v);
+    else if (r === "buckets") await viewBuckets(v);
+    else if (r.startsWith("buckets/")) await viewBucket(v, decodeURIComponent(r.slice(8)));
+    else if (r === "keys") await viewKeys(v);
+    else if (r === "monitoring") await viewMonitoring(v);
+    else if (r.startsWith("docs/")) viewDoc(v, r.slice(5));
+    else viewDoc(v, "getting-started");
   } catch (e) {
-    main().innerHTML = "";
-    main().append(el("div", { class: "empty" }, el("div", {}, ic(ICON.trash, 1.6)), "Error: " + e.message));
+    v.innerHTML = "";
+    v.append(el("div", { class: "empty" }, ic(ICON.info), el("h3", {}, "Something went wrong"), el("div", { class: "muted" }, e.message)));
     toast(e.message, "err");
   }
 }
+addEventListener("hashchange", render);
 
-function pageHeader(title, sub, actions) {
-  main().innerHTML = "";
-  const h = el("div", { class: "page-h" }, el("h2", {}, title));
-  if (sub) h.append(el("span", { class: "sub" }, sub));
-  main().append(h);
-  if (actions) main().append(actions);
+function pageHeader(v, title, desc, actions) {
+  v.innerHTML = "";
+  const h = el("div", { class: "pageh" }, el("div", {}, el("h2", {}, title), desc ? el("div", { class: "desc" }, desc) : null));
+  if (actions) h.append(el("div", { class: "actions" }, ...actions));
+  v.append(h);
 }
 
-// ---------- buckets list -------------------------------------------
+/* ============================ views ============================ */
+async function viewDashboard(v) {
+  let info = {};
+  try { info = await (await api("GET", "/gostore/admin/v1/info")).json(); } catch {}
+  SERVER = info;
+  pageHeader(v, "Dashboard", "Overview of your gostore deployment.");
 
-async function viewBuckets() {
+  const hero = el("div", { class: "hero" },
+    el("h3", {}, ic(ICON.term), "Your S3 endpoint"),
+    el("div", { class: "kvbig" },
+      kvRow("Endpoint", location.origin, true),
+      kvRow("Region", info.region || REGION, true),
+      kvRow("Addressing", "path-style (required)", false),
+      kvRow("Signature", "AWS Signature V4", false),
+      kvRow("Access key", session.ak, true)));
+  v.append(hero);
+
+  const tiles = el("div", { class: "grid stat-tiles" });
+  const tile = (k, val, icon) => tiles.append(el("div", { class: "tile" },
+    el("div", { class: "k" }, ic(icon), k), el("div", { class: "v", html: val })));
+  tile("Mode", info.mode || "—", ICON.layers);
+  tile("Drives", (info.drives ?? "—") + "", ICON.gauge);
+  tile("Total space", fmtSize(info.totalSpace) || "—", ICON.bucket);
+  tile("Free space", fmtSize(info.freeSpace) || "—", ICON.bucket);
+  tile("Users", (info.users ?? "—") + "", ICON.key);
+  tile("Policies", (info.policies ?? "—") + "", ICON.shield);
+  v.append(tiles);
+
+  v.append(el("h3", { style: "margin:26px 0 4px;font-size:15px" }, "Quick start"));
+  v.append(el("p", { class: "muted small" }, "Point the AWS CLI at this endpoint and you're storing objects:"));
+  v.append(codeBlock(
+`aws configure set aws_access_key_id ${session.ak}
+aws configure set aws_secret_access_key <YOUR_SECRET_KEY>
+aws configure set default.region ${info.region || REGION}
+aws configure set default.s3.addressing_style path
+
+aws --endpoint-url ${location.origin} s3 mb s3://my-first-bucket
+aws --endpoint-url ${location.origin} s3 cp ./file.zip s3://my-first-bucket/
+aws --endpoint-url ${location.origin} s3 ls s3://my-first-bucket`, "bash", "shell"));
+  v.append(el("p", { class: "small" }, "Full SDK guides are under ", el("a", { onclick: () => go("docs/connect") }, "Documentation"), "."));
+}
+function kvRow(k, val, copyable) {
+  return [el("span", { class: "k" }, k),
+    el("span", { class: "v" }, el("code", {}, val || "—"),
+      copyable && val ? el("button", { class: "ghost iconbtn", onclick: () => copyText(val), title: "Copy" }, ic(ICON.copy)) : null)];
+}
+
+async function viewBuckets(v) {
   const doc = parseXml(await (await must(await api("GET", "/"))).text());
   const names = [...doc.getElementsByTagName("Name")].map((n) => n.textContent);
   const dates = [...doc.getElementsByTagName("CreationDate")].map((n) => n.textContent);
-
+  pageHeader(v, "Buckets", names.length + (names.length === 1 ? " bucket" : " buckets"), [
+    el("button", { class: "ghost", onclick: render }, ic(ICON.refresh), "Refresh"),
+    el("button", { class: "primary", onclick: () => modal("Create bucket", "3–63 chars · lowercase letters, digits, - and .",
+      [{ name: "name", label: "Bucket name" },
+       { name: "lock", label: "Object Lock", type: "select", options: [{ label: "Disabled", value: "" }, { label: "Enabled (implies versioning)", value: "1" }] }],
+      async (val) => {
+        const h = val.lock ? { "x-amz-bucket-object-lock-enabled": "true" } : {};
+        await must(await api("PUT", "/" + val.name, { extraHeaders: h })); toast("Bucket created", "ok"); render();
+      }) }, ic(ICON.plus), "Create bucket"),
+  ]);
+  if (!names.length) { v.append(emptyState(ICON.bucket, "No buckets yet", "Create one to start storing objects.")); return; }
   const tb = el("tbody");
-  names.forEach((n, i) => {
-    tb.append(el("tr", { class: "clk", onclick: () => { state.bucket = n; state.prefix = ""; state.tab = "objects"; render(); } },
-      el("td", {}, el("span", { class: "name folder" }, ic(ICON.bucket), n)),
-      el("td", { class: "muted" }, relTime(dates[i])),
-      el("td", { class: "act" }, el("button", {
-        class: "danger sm", onclick: async (e) => {
-          e.stopPropagation();
-          if (!confirm(`Delete bucket "${n}"?  It must be empty.`)) return;
-          try { await must(await api("DELETE", "/" + n)); toast("Bucket deleted", "ok"); render(); }
-          catch (err) { toast(err.message, "err"); }
-        },
-      }, ic(ICON.trash, 1.8), "Delete"))));
-  });
-
-  pageHeader("Buckets", names.length + (names.length === 1 ? " bucket" : " buckets"),
-    el("div", { class: "toolbar" },
-      el("div", { class: "grow" }),
-      el("button", { class: "ghost", onclick: render }, ic(ICON.refresh), "Refresh"),
-      el("button", {
-        class: "primary", onclick: () => modal("Create bucket", "3–63 chars, lowercase letters, digits, - and .",
-          [{ name: "name", label: "Name" }], async (v) => { await must(await api("PUT", "/" + v.name)); toast("Bucket created", "ok"); render(); }),
-      }, ic(ICON.plus), "Create bucket")));
-
-  if (!names.length) main().append(el("div", { class: "empty" }, el("div", {}, ic(ICON.bucket, 1.4)), "No buckets yet."));
-  else main().append(el("div", { class: "card" }, el("table", {},
-    el("thead", {}, el("tr", {}, el("th", {}, "Name"), el("th", {}, "Created"), el("th", {}))), tb)));
+  names.forEach((n, i) => tb.append(el("tr", { class: "clk", onclick: () => go("buckets/" + encodeURIComponent(n)) },
+    el("td", {}, el("div", { class: "nm folder" }, ic(ICON.bucket), el("span", {}, n))),
+    el("td", { class: "muted" }, relTime(dates[i])),
+    el("td", { class: "act" }, el("button", { class: "danger sm", onclick: async (e) => {
+      e.stopPropagation();
+      if (!confirm(`Delete bucket "${n}"?  It must be empty.`)) return;
+      try { await must(await api("DELETE", "/" + n)); toast("Deleted", "ok"); render(); } catch (err) { toast(err.message, "err"); }
+    } }, ic(ICON.trash), "Delete")))));
+  v.append(el("div", { class: "card" }, el("table", {}, el("thead", {}, el("tr", {}, el("th", {}, "Name"), el("th", {}, "Created"), el("th", {}))), tb)));
 }
+const emptyState = (icon, h, sub) => el("div", { class: "empty" }, ic(icon), el("h3", {}, h), el("div", { class: "muted" }, sub));
 
-// ---------- one bucket: objects + settings -------------------------
+let bucketTab = "objects";
+async function viewBucket(v, b) {
+  pageHeader(v, b, null, [
+    el("button", { class: bucketTab === "objects" ? "primary" : "ghost", onclick: () => { bucketTab = "objects"; render(); } }, "Objects"),
+    el("button", { class: bucketTab === "settings" ? "primary" : "ghost", onclick: () => { bucketTab = "settings"; render(); } }, ic(ICON.gear), "Settings"),
+  ]);
+  v.append(el("div", { class: "crumbs" },
+    linkEl("Buckets", () => go("buckets")), el("span", { class: "sep" }, "/"),
+    linkEl(b, () => { bucketPrefix = ""; render(); })));
+  if (bucketTab === "settings") return bucketSettings(v, b);
+  await bucketObjects(v, b);
+}
+const linkEl = (t, fn) => { const a = el("a", {}, t); a.onclick = fn; return a; };
 
-async function viewBucket() {
-  const b = state.bucket;
-  const tabBtn = (id, label) => el("button", {
-    class: "ghost sm" + (state.tab === id ? " primary" : ""),
-    onclick: () => { state.tab = id; render(); },
-  }, label);
-
-  pageHeader(b, null, el("div", { class: "toolbar" },
-    tabBtn("objects", "Objects"), tabBtn("settings", "Settings"),
-    el("div", { class: "grow" })));
-
-  if (state.tab === "settings") return bucketSettings(b);
-
-  // objects toolbar
-  const bar = $(".toolbar");
+let bucketPrefix = "";
+async function bucketObjects(v, b) {
   const fi = el("input", { type: "file", multiple: "true", style: "display:none" });
-  fi.onchange = () => doUpload([...fi.files]);
-  bar.append(
-    el("div", { class: "search" }, ic(ICON.search),
-      el("input", { placeholder: "Filter this folder…", oninput: (e) => filterRows(e.target.value) })),
+  fi.onchange = () => doUpload(b, [...fi.files]);
+  const tb = el("div", { class: "toolbar" },
+    el("div", { class: "search" }, ic(ICON.search), el("input", { placeholder: "Filter this folder…", oninput: (e) => filterRows(e.target.value) })),
     el("button", { class: "ghost", onclick: render }, ic(ICON.refresh)),
+    el("div", { class: "grow" }),
     el("button", { class: "primary", onclick: () => fi.click() }, ic(ICON.up), "Upload"), fi);
-
+  v.append(tb);
   const drop = el("div", { id: "drop" });
-  main().append(drop);
   ["dragenter", "dragover"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("hot"); }));
   ["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("hot"); }));
-  drop.addEventListener("drop", (e) => doUpload([...e.dataTransfer.files]));
+  drop.addEventListener("drop", (e) => doUpload(b, [...e.dataTransfer.files]));
   drop.append(el("div", { id: "uplist" }));
+  v.append(drop);
 
-  const res = await must(await api("GET", "/" + b, {
-    query: { "list-type": "2", delimiter: "/", prefix: state.prefix, "max-keys": "1000" },
-  }));
+  if (bucketPrefix) {
+    const parts = bucketPrefix.split("/").filter(Boolean);
+    const cr = el("div", { class: "crumbs" }, linkEl("· root", () => { bucketPrefix = ""; render(); }));
+    let acc = "";
+    for (const seg of parts) { acc += seg + "/"; const a = acc; cr.append(el("span", { class: "sep" }, "/"), linkEl(seg, () => { bucketPrefix = a; render(); })); }
+    v.append(cr);
+  }
+
+  const res = await must(await api("GET", "/" + b, { query: { "list-type": "2", delimiter: "/", prefix: bucketPrefix, "max-keys": "1000" } }));
   const doc = parseXml(await res.text());
   const prefixes = [...doc.getElementsByTagName("CommonPrefixes")].map((n) => n.getElementsByTagName("Prefix")[0].textContent);
   const objs = [...doc.getElementsByTagName("Contents")].map((c) => ({
@@ -327,395 +399,694 @@ async function viewBucket() {
     size: c.getElementsByTagName("Size")[0]?.textContent,
     lm: c.getElementsByTagName("LastModified")[0]?.textContent,
     etag: (c.getElementsByTagName("ETag")[0]?.textContent || "").replace(/"/g, ""),
-  })).filter((o) => o.key !== state.prefix);
-  const truncated = doc.getElementsByTagName("IsTruncated")[0]?.textContent === "true";
+  })).filter((o) => o.key !== bucketPrefix);
 
-  const tb = el("tbody");
-  const selectAll = el("input", { type: "checkbox", class: "chk" });
-  selectAll.onchange = () => tb.querySelectorAll(".rowchk").forEach((c) => { c.checked = selectAll.checked; syncBulk(); });
-
-  if (state.prefix) {
-    const parent = state.prefix.replace(/[^/]+\/$/, "");
-    tb.append(el("tr", { class: "clk", onclick: () => { state.prefix = parent; render(); } },
-      el("td", {}), el("td", {}, el("span", { class: "name folder" }, ic(ICON.up), "..")), el("td", {}), el("td", {}), el("td", {})));
+  if (!prefixes.length && !objs.length) { v.append(emptyState(ICON.folder, "Empty folder", "Drag files here or use Upload.")); return; }
+  const tbody = el("tbody");
+  const selAll = el("input", { type: "checkbox" });
+  selAll.onchange = () => { tbody.querySelectorAll(".rc").forEach((c) => { c.checked = selAll.checked; }); syncBulk(); };
+  if (bucketPrefix) {
+    const parent = bucketPrefix.replace(/[^/]+\/$/, "");
+    tbody.append(el("tr", { class: "clk", onclick: () => { bucketPrefix = parent; render(); } },
+      el("td", {}), el("td", {}, el("div", { class: "nm folder" }, ic(ICON.up), el("span", {}, ".."))), el("td", {}), el("td", {}), el("td", {})));
   }
-  for (const p of prefixes) {
-    tb.append(el("tr", { class: "clk", onclick: () => { state.prefix = p; render(); } },
-      el("td", {}),
-      el("td", {}, el("span", { class: "name folder" }, ic(ICON.folder), p.slice(state.prefix.length))),
-      el("td", {}), el("td", {}), el("td", {})));
-  }
+  for (const p of prefixes) tbody.append(el("tr", { class: "clk", onclick: () => { bucketPrefix = p; render(); } },
+    el("td", {}), el("td", {}, el("div", { class: "nm folder" }, ic(ICON.folder), el("span", {}, p.slice(bucketPrefix.length)))), el("td", {}), el("td", {}), el("td", {})));
   for (const o of objs) {
-    const name = o.key.slice(state.prefix.length);
-    const chk = el("input", { type: "checkbox", class: "chk rowchk", onclick: (e) => e.stopPropagation(), onchange: syncBulk });
+    const nm = o.key.slice(bucketPrefix.length);
+    const chk = el("input", { type: "checkbox", class: "rc", onclick: (e) => e.stopPropagation(), onchange: syncBulk });
     chk.dataset.key = o.key;
-    tb.append(el("tr", { class: "clk", "data-name": name.toLowerCase(), onclick: () => objectDrawer(b, o) },
+    tbody.append(el("tr", { class: "clk", "data-name": nm.toLowerCase(), onclick: () => objectDrawer(b, o) },
       el("td", {}, chk),
-      el("td", {}, el("span", { class: "name" }, ic(ICON.file), name)),
+      el("td", {}, el("div", { class: "nm" }, ic(ICON.file), el("span", {}, nm))),
       el("td", { class: "muted" }, relTime(o.lm)),
       el("td", { class: "num" }, fmtSize(o.size)),
       el("td", { class: "act" },
-        el("button", { class: "ghost sm", onclick: (e) => { e.stopPropagation(); downloadObject(b, o.key); }, title: "Download" }, ic(ICON.down, 1.8)),
-        el("button", { class: "ghost sm", onclick: async (e) => { e.stopPropagation(); copyText(await presignGet(b + "/" + o.key)); }, title: "Copy share link" }, ic(ICON.link, 1.8)))));
+        el("button", { class: "ghost iconbtn", title: "Download", onclick: (e) => { e.stopPropagation(); dl(b, o.key); } }, ic(ICON.down)),
+        el("button", { class: "ghost iconbtn", title: "Copy share link", onclick: async (e) => { e.stopPropagation(); copyText(await presignGet(b + "/" + o.key)); } }, ic(ICON.link)))));
   }
-
   const bulk = el("div", { class: "toolbar hidden", id: "bulkbar" },
-    el("span", { class: "muted", id: "bulkn" }),
-    el("button", { class: "danger sm", onclick: bulkDelete }, ic(ICON.trash, 1.8), "Delete selected"));
-  main().append(bulk);
-
-  if (!prefixes.length && !objs.length)
-    main().append(el("div", { class: "empty" }, el("div", {}, ic(ICON.folder, 1.4)),
-      "This folder is empty. Drag files here or use Upload."));
-  else
-    main().append(el("div", { class: "card" }, el("table", {},
-      el("thead", {}, el("tr", {}, el("th", { style: "width:34px" }, selectAll),
-        el("th", {}, "Name"), el("th", {}, "Modified"), el("th", { class: "num" }, "Size"), el("th", {}))), tb)));
-
-  if (truncated) main().append(el("div", { class: "toolbar" },
-    el("span", { class: "muted" }, "Showing first 1000 entries.")));
+    el("span", { class: "muted small", id: "bulkn" }),
+    el("button", { class: "danger sm", onclick: () => bulkDel(b, tbody) }, ic(ICON.trash), "Delete selected"));
+  v.append(bulk);
+  v.append(el("div", { class: "card" }, el("table", {}, el("thead", {}, el("tr", {},
+    el("th", { style: "width:34px" }, selAll), el("th", {}, "Name"), el("th", {}, "Modified"), el("th", { class: "num" }, "Size"), el("th", {}))), tbody)));
 
   function syncBulk() {
-    const n = tb.querySelectorAll(".rowchk:checked").length;
-    bulk.classList.toggle("hidden", n === 0);
-    $("#bulkn").textContent = n + " selected";
-  }
-  async function bulkDelete() {
-    const keys = [...tb.querySelectorAll(".rowchk:checked")].map((c) => c.dataset.key);
-    if (!confirm(`Delete ${keys.length} object(s)?`)) return;
-    const body = `<Delete>${keys.map((k) => `<Object><Key>${k.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</Key></Object>`).join("")}</Delete>`;
-    await must(await api("POST", "/" + b, { query: { delete: "" }, contentType: "application/xml", body }));
-    toast("Deleted " + keys.length, "ok"); render();
+    const n = tbody.querySelectorAll(".rc:checked").length;
+    bulk.classList.toggle("hidden", !n); $("#bulkn").textContent = n + " selected";
   }
 }
-
+async function bulkDel(b, tbody) {
+  const keys = [...tbody.querySelectorAll(".rc:checked")].map((c) => c.dataset.key);
+  if (!confirm(`Delete ${keys.length} object(s)?`)) return;
+  const body = `<Delete>${keys.map((k) => `<Object><Key>${k.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</Key></Object>`).join("")}</Delete>`;
+  await must(await api("POST", "/" + b, { query: { delete: "" }, contentType: "application/xml", body }));
+  toast("Deleted " + keys.length, "ok"); render();
+}
 function filterRows(q) {
   q = q.toLowerCase();
-  document.querySelectorAll("#main tbody tr[data-name]").forEach((tr) => {
-    tr.style.display = !q || tr.dataset.name.includes(q) ? "" : "none";
-  });
+  document.querySelectorAll("#view tbody tr[data-name]").forEach((tr) => { tr.style.display = !q || tr.dataset.name.includes(q) ? "" : "none"; });
 }
-
-async function doUpload(files) {
+async function doUpload(b, files) {
   if (!files.length) return;
-  const list = $("#uplist") || main();
+  const list = $("#uplist");
   for (const f of files) {
-    const key = state.prefix + f.name;
-    const row = el("div", { class: "up" }, ic(ICON.file), el("span", {}, f.name),
-      el("span", { class: "bar" }, el("span", {})));
+    const row = el("div", { class: "up" }, ic(ICON.file), el("span", {}, f.name), el("span", { class: "bar" }, el("span", {})));
     list.append(row);
-    const barFill = row.querySelector(".bar>span");
-    try {
-      await upload(state.bucket + "/" + key, f, (p) => (barFill.style.width = (p * 100).toFixed(0) + "%"));
-      barFill.style.width = "100%"; row.style.opacity = ".5";
-    } catch (e) { toast(f.name + ": " + e.message, "err"); row.remove(); }
+    const fill = row.querySelector(".bar>span");
+    try { await upload(b + "/" + bucketPrefix + f.name, f, (p) => (fill.style.width = (p * 100).toFixed(0) + "%")); fill.style.width = "100%"; row.style.opacity = ".5"; }
+    catch (e) { toast(f.name + ": " + e.message, "err"); row.remove(); }
   }
-  toast("Upload complete", "ok");
-  setTimeout(render, 400);
+  toast("Upload complete", "ok"); setTimeout(render, 400);
 }
-
-async function downloadObject(b, key, query) {
+async function dl(b, key, query) {
   try {
     const r = await must(await api("GET", "/" + b + "/" + key, { query: query || {} }));
-    const blob = await r.blob();
-    const a = el("a", { href: URL.createObjectURL(blob), download: key.split("/").pop() });
+    const a = el("a", { href: URL.createObjectURL(await r.blob()), download: key.split("/").pop() });
     document.body.append(a); a.click(); a.remove();
   } catch (e) { toast(e.message, "err"); }
 }
 
 async function objectDrawer(b, o) {
-  const name = o.key.split("/").pop();
   openDrawer((d) => {
-    d.append(el("div", { class: "dh" }, ic(ICON.file), el("h3", {}, name),
-      el("button", { class: "ghost sm", onclick: closeDrawer }, "✕")));
-    const tabs = el("div", { class: "tabs" });
-    const body = el("div", { class: "db" });
+    d.append(el("div", { class: "dh" }, ic(ICON.file), el("h3", {}, o.key.split("/").pop()),
+      el("button", { class: "ghost iconbtn", onclick: closeDrawer }, "✕")));
+    const tabs = el("div", { class: "tabs" }), body = el("div", { class: "db" });
     d.append(tabs, body);
-    const tab = (id, label, fn) => {
-      const btn = el("button", { class: (id === "details" ? "on" : ""), onclick: () => { tabs.querySelectorAll("button").forEach((x) => x.classList.remove("on")); btn.classList.add("on"); body.innerHTML = ""; fn(body); } }, label);
-      tabs.append(btn); return btn;
+    const tab = (id, label, fn, on) => {
+      const btn = el("button", { class: on ? "on" : "", onclick: () => { tabs.querySelectorAll("button").forEach((x) => x.classList.remove("on")); btn.classList.add("on"); body.innerHTML = ""; fn(body); } }, label);
+      tabs.append(btn); if (on) fn(body); return btn;
     };
-    tab("details", "Details", (c) => {
+    tab("d", "Details", (c) => {
       c.append(el("div", { class: "kv" },
         el("div", { class: "k" }, "Key"), el("div", { class: "v" }, o.key),
         el("div", { class: "k" }, "Size"), el("div", { class: "v" }, fmtSize(o.size) + ` (${o.size} B)`),
         el("div", { class: "k" }, "Modified"), el("div", { class: "v" }, fmtDate(o.lm)),
         el("div", { class: "k" }, "ETag"), el("div", { class: "v" }, el("code", {}, o.etag))));
-      c.append(el("button", { class: "primary", onclick: () => downloadObject(b, o.key) }, ic(ICON.down, 1.8), "Download"));
-      c.append(el("button", {
-        class: "danger", style: "margin-left:8px", onclick: async () => {
+      c.append(el("div", { class: "row" },
+        el("button", { class: "primary", onclick: () => dl(b, o.key) }, ic(ICON.down), "Download"),
+        el("button", { class: "danger", onclick: async () => {
           if (!confirm("Delete " + o.key + "?")) return;
-          try { await must(await api("DELETE", "/" + b + "/" + o.key)); toast("Deleted", "ok"); closeDrawer(); render(); }
-          catch (e) { toast(e.message, "err"); }
-        },
-      }, ic(ICON.trash, 1.8), "Delete"));
+          try { await must(await api("DELETE", "/" + b + "/" + o.key)); toast("Deleted", "ok"); closeDrawer(); render(); } catch (e) { toast(e.message, "err"); }
+        } }, ic(ICON.trash), "Delete")));
+    }, true);
+    tab("s", "Share", (c) => {
+      const sel = el("select"); for (const [l, val] of [["15 minutes", 900], ["1 hour", 3600], ["24 hours", 86400], ["7 days", 604800]]) sel.append(el("option", { value: val }, l));
+      const out = el("textarea", { readonly: "", style: "min-height:84px" });
+      c.append(el("label", { class: "field-label" }, "Link expires in"), sel,
+        el("button", { class: "primary", style: "margin-top:12px", onclick: async () => { out.value = await presignGet(b + "/" + o.key, +sel.value); } }, ic(ICON.link), "Generate link"),
+        el("div", { style: "margin-top:10px" }, out),
+        el("button", { class: "ghost sm", style: "margin-top:6px", onclick: () => copyText(out.value) }, ic(ICON.copy), "Copy"));
     });
-    tab("share", "Share", (c) => {
-      c.append(el("div", { class: "field" },
-        el("label", {}, "Presigned GET link expires in"),
-        (() => { const s = el("select"); for (const [l, v] of [["15 minutes", 900], ["1 hour", 3600], ["24 hours", 86400], ["7 days", 604800]]) s.append(el("option", { value: v }, l)); s.id = "exp"; return s; })()));
-      const out = el("textarea", { readonly: "" }); out.style.minHeight = "90px";
-      c.append(el("button", {
-        class: "primary", onclick: async () => { out.value = await presignGet(b + "/" + o.key, Number($("#exp").value)); },
-      }, ic(ICON.link, 1.8), "Generate link"));
-      c.append(el("div", { class: "field" }, out,
-        el("button", { class: "ghost sm", style: "margin-top:6px", onclick: () => copyText(out.value) }, ic(ICON.copy, 1.8), "Copy")));
-    });
-    tab("versions", "Versions", async (c) => {
+    tab("v", "Versions", async (c) => {
       c.append(el("div", { class: "empty" }, el("span", { class: "spin" })));
       try {
         const doc = parseXml(await (await api("GET", "/" + b, { query: { versions: "", prefix: o.key } })).text());
         const rows = [];
-        for (const v of doc.getElementsByTagName("Version"))
-          rows.push({ id: v.getElementsByTagName("VersionId")[0].textContent, latest: v.getElementsByTagName("IsLatest")[0]?.textContent === "true", size: v.getElementsByTagName("Size")[0]?.textContent, lm: v.getElementsByTagName("LastModified")[0]?.textContent, dm: false });
-        for (const v of doc.getElementsByTagName("DeleteMarker"))
-          rows.push({ id: v.getElementsByTagName("VersionId")[0].textContent, latest: v.getElementsByTagName("IsLatest")[0]?.textContent === "true", lm: v.getElementsByTagName("LastModified")[0]?.textContent, dm: true });
+        for (const x of doc.getElementsByTagName("Version")) rows.push({ id: t(x, "VersionId"), latest: t(x, "IsLatest") === "true", size: t(x, "Size"), lm: t(x, "LastModified"), dm: false });
+        for (const x of doc.getElementsByTagName("DeleteMarker")) rows.push({ id: t(x, "VersionId"), latest: t(x, "IsLatest") === "true", lm: t(x, "LastModified"), dm: true });
         c.innerHTML = "";
-        if (!rows.length) { c.append(el("div", { class: "muted" }, "This bucket is not versioned, or the key has no versions.")); return; }
-        for (const v of rows) {
-          const row = el("div", { class: "kv", style: "grid-template-columns:1fr auto;align-items:center" },
-            el("div", {},
-              el("code", {}, v.id),
-              v.latest ? el("span", { class: "pill ok", style: "margin-left:6px" }, "latest") : null,
-              v.dm ? el("span", { class: "pill", style: "margin-left:6px" }, "delete marker") : null,
-              el("div", { class: "muted", style: "font-size:12px" }, fmtDate(v.lm) + (v.size ? " · " + fmtSize(v.size) : ""))),
-            el("div", {},
-              v.dm ? null : el("button", { class: "ghost sm", onclick: () => downloadObject(b, o.key, { versionId: v.id }) }, ic(ICON.down, 1.8)),
-              el("button", { class: "danger sm", onclick: async () => {
-                if (!confirm("Permanently delete this version?")) return;
-                try { await must(await api("DELETE", "/" + b + "/" + o.key, { query: { versionId: v.id } })); toast("Version deleted", "ok"); }
-                catch (e) { toast(e.message, "err"); }
-              } }, ic(ICON.trash, 1.8))));
-          c.append(row);
-        }
-      } catch (e) { c.innerHTML = ""; c.append(el("div", { class: "muted" }, e.message)); }
+        if (!rows.length) { c.append(el("div", { class: "muted small" }, "This bucket is not versioned, or the key has no versions.")); return; }
+        for (const rv of rows) c.append(el("div", { class: "kv", style: "grid-template-columns:1fr auto;align-items:center" },
+          el("div", {}, el("code", {}, rv.id), rv.latest ? el("span", { class: "pill ok" }, "latest") : null, rv.dm ? el("span", { class: "pill warn" }, "delete marker") : null,
+            el("div", { class: "muted small" }, fmtDate(rv.lm) + (rv.size ? " · " + fmtSize(rv.size) : ""))),
+          el("div", { class: "row" },
+            rv.dm ? null : el("button", { class: "ghost iconbtn", onclick: () => dl(b, o.key, { versionId: rv.id }) }, ic(ICON.down)),
+            el("button", { class: "danger iconbtn", onclick: async () => { if (!confirm("Permanently delete this version?")) return; try { await must(await api("DELETE", "/" + b + "/" + o.key, { query: { versionId: rv.id } })); toast("Version deleted", "ok"); } catch (e) { toast(e.message, "err"); } } }, ic(ICON.trash)))));
+      } catch (e) { c.innerHTML = ""; c.append(el("div", { class: "muted small" }, e.message)); }
     });
-    tab("tags", "Tags", async (c) => {
-      c.append(el("div", { class: "empty" }, el("span", { class: "spin" })));
+    tab("t", "Tags", async (c) => {
       try {
         const doc = parseXml(await (await api("GET", "/" + b + "/" + o.key, { query: { tagging: "" } })).text());
-        const tags = [...doc.getElementsByTagName("Tag")].map((t) => [t.getElementsByTagName("Key")[0].textContent, t.getElementsByTagName("Value")[0].textContent]);
-        c.innerHTML = "";
-        const ta = el("textarea", { placeholder: "key=value\nenv=prod" }, tags.map(([k, v]) => `${k}=${v}`).join("\n"));
-        c.append(el("div", { class: "field" }, el("label", {}, "One key=value per line"), ta));
-        c.append(el("button", {
-          class: "primary", onclick: async () => {
+        const tags = [...doc.getElementsByTagName("Tag")].map((x) => [t(x, "Key"), t(x, "Value")]);
+        const ta = el("textarea", { placeholder: "key=value\nenv=prod" }, tags.map(([k, val]) => `${k}=${val}`).join("\n"));
+        c.append(el("label", { class: "field-label" }, "One key=value per line"), ta,
+          el("button", { class: "primary", style: "margin-top:12px", onclick: async () => {
             const set = ta.value.split("\n").map((l) => l.split("=")).filter((p) => p[0].trim());
-            const xml = `<Tagging><TagSet>${set.map(([k, v]) => `<Tag><Key>${k.trim()}</Key><Value>${(v || "").trim()}</Value></Tag>`).join("")}</TagSet></Tagging>`;
-            try { await must(await api("PUT", "/" + b + "/" + o.key, { query: { tagging: "" }, contentType: "application/xml", body: xml })); toast("Tags saved", "ok"); }
-            catch (e) { toast(e.message, "err"); }
-          },
-        }, "Save tags"));
-      } catch (e) { c.innerHTML = ""; c.append(el("div", { class: "muted" }, e.message)); }
+            const xml = `<Tagging><TagSet>${set.map(([k, val]) => `<Tag><Key>${k.trim()}</Key><Value>${(val || "").trim()}</Value></Tag>`).join("")}</TagSet></Tagging>`;
+            try { await must(await api("PUT", "/" + b + "/" + o.key, { query: { tagging: "" }, contentType: "application/xml", body: xml })); toast("Tags saved", "ok"); } catch (e) { toast(e.message, "err"); }
+          } }, "Save tags"));
+      } catch (e) { c.append(el("div", { class: "muted small" }, e.message)); }
     });
   });
 }
+const t = (node, tag) => node.getElementsByTagName(tag)[0]?.textContent || "";
 
-// ---------- bucket settings --------------------------------------
-
-async function bucketSettings(b) {
-  const wrap = el("div");
-  main().append(wrap);
-  const sec = (title, node) => { wrap.append(el("h3", { style: "margin:22px 0 8px;font-size:15px" }, title)); wrap.append(node); };
+async function bucketSettings(v, b) {
+  const sec = (title, ...nodes) => { v.append(el("h3", { style: "margin:24px 0 8px;font-size:15px" }, title)); nodes.forEach((n) => v.append(n)); };
+  const editor = async (label, q, ctype, preset) => {
+    let cur = "";
+    try { const r = await api("GET", "/" + b, { query: { [q]: "" } }); if (r.ok) { const txt = await r.text(); if (!txt.startsWith("<Error") && !/NoSuch/.test(txt)) cur = ctype === "application/json" ? JSON.stringify(JSON.parse(txt), null, 2) : txt; } } catch {}
+    const ta = el("textarea", { placeholder: preset || "" }, cur);
+    const bar = el("div", { class: "toolbar" });
+    if (preset) bar.append(el("button", { class: "ghost sm", onclick: () => ta.value = preset }, "Insert example"));
+    bar.append(
+      el("button", { class: "primary sm", onclick: async () => { try { await must(await api("PUT", "/" + b, { query: { [q]: "" }, contentType: ctype, body: ta.value })); toast(label + " saved", "ok"); } catch (e) { toast(e.message, "err"); } } }, "Save"),
+      el("button", { class: "danger sm", onclick: async () => { await api("DELETE", "/" + b, { query: { [q]: "" } }); ta.value = ""; toast(label + " removed", "ok"); } }, "Remove"));
+    sec(label, ta, bar);
+  };
 
   // versioning
   let vstat = "";
-  try {
-    const d = parseXml(await (await api("GET", "/" + b, { query: { versioning: "" } })).text());
-    vstat = d.getElementsByTagName("Status")[0]?.textContent || "";
-  } catch {}
+  try { vstat = t(parseXml(await (await api("GET", "/" + b, { query: { versioning: "" } })).text()), "Status"); } catch {}
   const vsel = el("select"); for (const o of [["Off", ""], ["Enabled", "Enabled"], ["Suspended", "Suspended"]]) vsel.append(el("option", { value: o[1] }, o[0]));
   vsel.value = vstat;
-  sec("Versioning", el("div", { style: "display:flex;gap:8px;align-items:center;max-width:340px" },
-    vsel,
-    el("button", {
-      class: "primary sm", onclick: async () => {
-        if (!vsel.value) { toast("S3 cannot turn versioning fully off once enabled — use Suspended.", "err"); return; }
-        try {
-          await must(await api("PUT", "/" + b, { query: { versioning: "" }, contentType: "application/xml",
-            body: `<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>${vsel.value}</Status></VersioningConfiguration>` }));
-          toast("Versioning: " + vsel.value, "ok");
-        } catch (e) { toast(e.message, "err"); }
-      },
-    }, "Apply")));
+  sec("Versioning", el("div", { class: "row", style: "max-width:360px" }, vsel,
+    el("button", { class: "primary sm", onclick: async () => {
+      if (!vsel.value) return toast("S3 can't fully disable versioning once enabled — use Suspended.", "err");
+      try { await must(await api("PUT", "/" + b, { query: { versioning: "" }, contentType: "application/xml", body: `<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>${vsel.value}</Status></VersioningConfiguration>` })); toast("Versioning: " + vsel.value, "ok"); } catch (e) { toast(e.message, "err"); }
+    } }, "Apply")));
 
-  // policy
-  let polDoc = "";
-  try {
-    const t = await (await api("GET", "/" + b, { query: { policy: "" } })).text();
-    if (!t.startsWith("<")) polDoc = JSON.stringify(JSON.parse(t), null, 2);
-  } catch {}
-  const polTa = el("textarea", { placeholder: "No bucket policy. Paste a JSON policy document." }, polDoc);
-  sec("Access Policy", el("div", {},
-    polTa,
-    el("div", { class: "toolbar" },
-      el("button", { class: "ghost sm", onclick: () => polTa.value = JSON.stringify({ Version: "2012-10-17", Statement: [{ Effect: "Allow", Principal: "*", Action: ["s3:GetObject"], Resource: [`arn:aws:s3:::${b}/*`] }] }, null, 2) }, "Public read preset"),
-      el("button", { class: "primary sm", onclick: async () => { try { await must(await api("PUT", "/" + b, { query: { policy: "" }, contentType: "application/json", body: polTa.value })); toast("Policy saved", "ok"); } catch (e) { toast(e.message, "err"); } } }, "Save policy"),
-      el("button", { class: "danger sm", onclick: async () => { await api("DELETE", "/" + b, { query: { policy: "" } }); polTa.value = ""; toast("Policy removed", "ok"); } }, "Remove"))));
-
-  // CORS
-  let corsDoc = "";
-  try { const r = await api("GET", "/" + b, { query: { cors: "" } }); if (r.ok) corsDoc = await r.text(); } catch {}
-  const corsTa = el("textarea", { placeholder: '<CORSConfiguration><CORSRule><AllowedOrigin>*</AllowedOrigin><AllowedMethod>GET</AllowedMethod></CORSRule></CORSConfiguration>' }, corsDoc.startsWith("<CORS") ? corsDoc : "");
-  sec("CORS", el("div", {},
-    corsTa,
-    el("div", { class: "toolbar" },
-      el("button", { class: "primary sm", onclick: async () => { try { await must(await api("PUT", "/" + b, { query: { cors: "" }, contentType: "application/xml", body: corsTa.value })); toast("CORS saved", "ok"); } catch (e) { toast(e.message, "err"); } } }, "Save CORS"),
-      el("button", { class: "danger sm", onclick: async () => { await api("DELETE", "/" + b, { query: { cors: "" } }); corsTa.value = ""; toast("CORS removed", "ok"); } }, "Remove"))));
-
-  // replication
-  let repl = [];
-  try { const r = await api("GET", "/" + b, { query: { replication: "" } }); if (r.ok) repl = await r.json(); } catch {}
-  const rTa = el("textarea", {}, JSON.stringify(repl, null, 2));
-  sec("Replication", el("div", {},
-    el("p", { class: "muted", style: "font-size:12.5px;margin:.2em 0" },
-      'e.g. [{"id":"r1","prefix":"","destBucket":"backup","destEndpoint":"https://s3.other.com","destRegion":"us-east-1","destAccessKey":"…","destSecretKey":"…","deleteReplication":true}] — omit destEndpoint to replicate to a local bucket'),
-    rTa,
-    el("div", { class: "toolbar" },
-      el("button", { class: "primary sm", onclick: async () => { try { await must(await api("PUT", "/" + b, { query: { replication: "" }, contentType: "application/json", body: rTa.value })); toast("Replication saved", "ok"); } catch (e) { toast(e.message, "err"); } } }, "Save"),
-      el("button", { class: "danger sm", onclick: async () => { await api("DELETE", "/" + b, { query: { replication: "" } }); rTa.value = "[]"; toast("Replication removed", "ok"); } }, "Remove"))));
-
-  // lifecycle
-  let lc = "";
-  try { const r = await api("GET", "/" + b, { query: { lifecycle: "" } }); if (r.ok) { const t = await r.text(); if (t.startsWith("<Lifecycle")) lc = t; } } catch {}
-  const lcTa = el("textarea", { placeholder: '<LifecycleConfiguration><Rule><ID>expire-logs</ID><Status>Enabled</Status><Filter><Prefix>logs/</Prefix></Filter><Expiration><Days>30</Days></Expiration></Rule></LifecycleConfiguration>' }, lc);
-  sec("Lifecycle (ILM)", el("div", {},
-    el("p", { class: "muted", style: "font-size:12.5px;margin:.2em 0" }, "Expiration / NoncurrentVersionExpiration / AbortIncompleteMultipartUpload. Applied by the background scanner (default hourly)."),
-    lcTa,
-    el("div", { class: "toolbar" },
-      el("button", { class: "primary sm", onclick: async () => { try { await must(await api("PUT", "/" + b, { query: { lifecycle: "" }, contentType: "application/xml", body: lcTa.value })); toast("Lifecycle saved", "ok"); } catch (e) { toast(e.message, "err"); } } }, "Save"),
-      el("button", { class: "danger sm", onclick: async () => { await api("DELETE", "/" + b, { query: { lifecycle: "" } }); lcTa.value = ""; toast("Lifecycle removed", "ok"); } }, "Remove"))));
-
-  // notifications
-  let notif = { webhooks: [] };
-  try { const r = await api("GET", "/" + b, { query: { notification: "" } }); if (r.ok) notif = await r.json(); } catch {}
-  const nTa = el("textarea", {}, JSON.stringify(notif, null, 2));
-  sec("Event notifications (webhooks)", el("div", {},
-    el("p", { class: "muted", style: "font-size:12.5px;margin:.2em 0" }, 'e.g. {"webhooks":[{"id":"w1","url":"https://…","events":["s3:ObjectCreated:*"],"prefix":"","suffix":".jpg"}]}'),
-    nTa,
-    el("div", { class: "toolbar" },
-      el("button", { class: "primary sm", onclick: async () => { try { await must(await api("PUT", "/" + b, { query: { notification: "" }, contentType: "application/json", body: nTa.value })); toast("Notifications saved", "ok"); } catch (e) { toast(e.message, "err"); } } }, "Save"))));
+  await editor("Bucket policy", "policy", "application/json",
+    JSON.stringify({ Version: "2012-10-17", Statement: [{ Effect: "Allow", Principal: "*", Action: ["s3:GetObject"], Resource: [`arn:aws:s3:::${b}/*`] }] }, null, 2));
+  await editor("Lifecycle (ILM)", "lifecycle", "application/xml",
+    `<LifecycleConfiguration><Rule><ID>expire-logs</ID><Status>Enabled</Status><Filter><Prefix>logs/</Prefix></Filter><Expiration><Days>30</Days></Expiration></Rule></LifecycleConfiguration>`);
+  await editor("Replication", "replication", "application/json",
+    JSON.stringify([{ id: "r1", prefix: "", destBucket: "backup", destEndpoint: "", deleteReplication: true }], null, 2));
+  await editor("CORS", "cors", "application/xml",
+    `<CORSConfiguration><CORSRule><AllowedOrigin>*</AllowedOrigin><AllowedMethod>GET</AllowedMethod><AllowedHeader>*</AllowedHeader></CORSRule></CORSConfiguration>`);
+  await editor("Event notifications", "notification", "application/json",
+    JSON.stringify({ webhooks: [{ id: "w1", url: "https://example.com/hook", events: ["s3:ObjectCreated:*"], prefix: "", suffix: "" }] }, null, 2));
 }
 
-// ---------- identity --------------------------------------------
-
-async function viewIdentity() {
+async function viewKeys(v) {
   const [ur, sr] = await Promise.all([api("GET", "/gostore/admin/v1/users"), api("GET", "/gostore/admin/v1/service-accounts")]);
-  if (ur.status === 403) { pageHeader("Access Keys"); main().append(el("div", { class: "empty" }, "Your account does not have admin permission.")); return; }
-  const users = await (await must(ur)).json() || [];
-  const svcs = sr.ok ? (await sr.json() || []) : [];
-
-  pageHeader("Access Keys", users.length + " users, " + svcs.length + " service accounts",
-    el("div", { class: "toolbar" }, el("div", { class: "grow" }),
-      el("button", { class: "ghost", onclick: render }, ic(ICON.refresh), "Refresh"),
-      el("button", {
-        onclick: async () => {
-          try {
-            const j = await (await must(await api("POST", "/gostore/admin/v1/service-accounts", { contentType: "application/json", body: "{}" }))).json();
-            modal("Service account created", "Copy the secret now — it is not shown again.",
-              [{ name: "a", label: "Access key", value: j.accessKey, readonly: true }, { name: "s", label: "Secret key", value: j.secretKey, readonly: true }],
-              async () => {}, "Done");
-            render();
-          } catch (e) { toast(e.message, "err"); }
-        },
-      }, ic(ICON.plus), "Service account"),
-      el("button", {
-        class: "primary", onclick: () => modal("Create user", "Access key ≥3 chars, secret ≥8 chars.", [
-          { name: "accessKey", label: "Access key" },
-          { name: "secretKey", label: "Secret key", type: "password" },
-          { name: "policy", label: "Policy", type: "select", value: "readwrite", options: ["readwrite", "readonly", "writeonly", "consoleAdmin", "diagnostics"] },
-        ], async (v) => {
-          await must(await api("PUT", "/gostore/admin/v1/users", { contentType: "application/json", body: JSON.stringify({ accessKey: v.accessKey, secretKey: v.secretKey, policies: [v.policy] }) }));
-          toast("User created", "ok"); render();
-        }),
-      }, ic(ICON.plus), "Create user")));
-
+  if (ur.status === 403) { pageHeader(v, "Access Keys"); v.append(emptyState(ICON.lock, "No admin permission", "Your key can't manage users. Sign in with an admin key.")); return; }
+  const users = (await (await must(ur)).json()) || [];
+  const svcs = sr.ok ? (await sr.json()) || [] : [];
+  pageHeader(v, "Access Keys", users.length + " users · " + svcs.length + " service accounts", [
+    el("button", { class: "ghost", onclick: render }, ic(ICON.refresh), "Refresh"),
+    el("button", { onclick: async () => {
+      try {
+        const j = await (await must(await api("POST", "/gostore/admin/v1/service-accounts", { contentType: "application/json", body: "{}" }))).json();
+        modal("Service account created", "Copy the secret now — it is shown only once.", [
+          { name: "a", label: "Access key", value: j.accessKey, readonly: true },
+          { name: "s", label: "Secret key", value: j.secretKey, readonly: true }], async () => {}, "Done");
+        render();
+      } catch (e) { toast(e.message, "err"); }
+    } }, ic(ICON.plus), "Service account"),
+    el("button", { class: "primary", onclick: () => modal("Create user", "Access key ≥3 chars · secret ≥8 chars.", [
+      { name: "accessKey", label: "Access key" }, { name: "secretKey", label: "Secret key", type: "password" },
+      { name: "policy", label: "Policy", type: "select", value: "readwrite", options: ["readwrite", "readonly", "writeonly", "consoleAdmin", "diagnostics"] },
+    ], async (val) => {
+      await must(await api("PUT", "/gostore/admin/v1/users", { contentType: "application/json", body: JSON.stringify({ accessKey: val.accessKey, secretKey: val.secretKey, policies: [val.policy] }) }));
+      toast("User created", "ok"); render();
+    }) }, ic(ICON.plus), "Create user"),
+  ]);
   const tb = el("tbody");
   for (const u of users) tb.append(el("tr", {},
-    el("td", {}, el("span", { class: "name" }, ic(ICON.copy, 1.8), el("code", {}, u.accessKey))),
+    el("td", {}, el("div", { class: "nm" }, ic(ICON.key), el("code", {}, u.accessKey))),
     el("td", { class: "muted" }, "user"),
     el("td", {}, (u.policies || []).map((p) => el("span", { class: "pill" }, p))),
-    el("td", {}, el("span", { class: "pill" + (u.status !== "disabled" ? " ok" : "") }, u.status || "enabled")),
-    el("td", { class: "act" }, el("button", {
-      class: "danger sm", onclick: async () => {
-        if (!confirm("Delete user " + u.accessKey + "?")) return;
-        await api("DELETE", "/gostore/admin/v1/users", { query: { accessKey: u.accessKey } });
-        toast("Deleted", "ok"); render();
-      },
-    }, ic(ICON.trash, 1.8)))));
+    el("td", {}, el("span", { class: "pill" + (u.status !== "disabled" ? " ok" : " warn") }, u.status || "enabled")),
+    el("td", { class: "act" }, el("button", { class: "danger sm", onclick: async () => {
+      if (!confirm("Delete user " + u.accessKey + "?")) return;
+      await api("DELETE", "/gostore/admin/v1/users", { query: { accessKey: u.accessKey } }); toast("Deleted", "ok"); render();
+    } }, ic(ICON.trash)))));
   for (const s of svcs) tb.append(el("tr", {},
-    el("td", {}, el("span", { class: "name" }, ic(ICON.copy, 1.8), el("code", {}, s.accessKey))),
+    el("td", {}, el("div", { class: "nm" }, ic(ICON.key), el("code", {}, s.accessKey))),
     el("td", { class: "muted" }, "service account"),
     el("td", {}, el("span", { class: "pill" }, "parent: " + s.parentUser)),
     el("td", {}, el("span", { class: "pill ok" }, s.status || "enabled")),
-    el("td", { class: "act" }, el("button", {
-      class: "danger sm", onclick: async () => {
-        await api("DELETE", "/gostore/admin/v1/service-accounts", { query: { accessKey: s.accessKey } });
-        toast("Deleted", "ok"); render();
-      },
-    }, ic(ICON.trash, 1.8)))));
-
-  main().append(el("div", { class: "card" }, el("table", {},
-    el("thead", {}, el("tr", {}, el("th", {}, "Access key"), el("th", {}, "Type"), el("th", {}, "Policy"), el("th", {}, "Status"), el("th", {}))), tb)));
+    el("td", { class: "act" }, el("button", { class: "danger sm", onclick: async () => {
+      await api("DELETE", "/gostore/admin/v1/service-accounts", { query: { accessKey: s.accessKey } }); toast("Deleted", "ok"); render();
+    } }, ic(ICON.trash)))));
+  v.append(el("div", { class: "card" }, el("table", {}, el("thead", {}, el("tr", {},
+    el("th", {}, "Access key"), el("th", {}, "Type"), el("th", {}, "Policy"), el("th", {}, "Status"), el("th", {}))), tb)));
+  v.append(el("p", { class: "small muted", style: "margin-top:14px" }, "Policy language and STS are covered in ",
+    el("a", { onclick: () => go("docs/iam") }, "Documentation → IAM & Policies"), "."));
 }
 
-// ---------- monitoring -----------------------------------------
-
-async function viewInfo() {
+async function viewMonitoring(v) {
   const j = await (await must(await api("GET", "/gostore/admin/v1/info"))).json();
-  pageHeader("Monitoring", j.version);
-  const grid = el("div", { class: "stat-grid" });
-  const stat = (k, v) => grid.append(el("div", { class: "stat" }, el("div", { class: "k" }, k), el("div", { class: "v" }, String(v))));
-  stat("Mode", j.mode);
-  stat("Drives", j.drives);
-  stat("Parity", j.parity ?? "—");
-  stat("Total space", fmtSize(j.totalSpace) || "—");
-  stat("Free space", fmtSize(j.freeSpace) || "—");
-  stat("Users", j.users);
-  stat("Policies", j.policies);
-  stat("Region", j.region);
-  main().append(grid);
+  pageHeader(v, "Monitoring", j.version);
+  const tiles = el("div", { class: "grid stat-tiles" });
+  const tile = (k, val) => tiles.append(el("div", { class: "tile" }, el("div", { class: "k" }, k), el("div", { class: "v" }, String(val))));
+  tile("Mode", j.mode); tile("Drives", j.drives); tile("Parity", j.parity ?? "—");
+  tile("Total space", fmtSize(j.totalSpace) || "—"); tile("Free space", fmtSize(j.freeSpace) || "—");
+  tile("Users", j.users); tile("Policies", j.policies); tile("Region", j.region);
+  v.append(tiles);
+  const row = el("div", { class: "toolbar" });
+  row.append(el("button", { onclick: async (e) => {
+    e.target.disabled = true;
+    try { const rep = await (await must(await api("POST", "/gostore/admin/v1/scanner/run"))).json(); toast(`Scan: ${rep.objectsExpired} expired, ${rep.noncurrentVersionsExpired} versions, ${rep.multipartUploadsAborted} uploads aborted`, "ok"); }
+    catch (err) { toast(err.message, "err"); } e.target.disabled = false;
+  } }, ic(ICON.clock), "Run lifecycle scan"));
+  if (j.mode === "erasure") row.append(el("button", { onclick: async (e) => {
+    e.target.disabled = true;
+    try { const rep = await (await must(await api("POST", "/gostore/admin/v1/heal"))).json(); toast(`Heal: ${rep.objectsHealed}/${rep.objectsScanned} objects, ${rep.shardsRewritten} shards`, "ok"); }
+    catch (err) { toast(err.message, "err"); } e.target.disabled = false;
+  } }, ic(ICON.refresh), "Run heal"));
+  v.append(row);
+}
 
-  if (j.mode === "erasure") {
-    main().append(el("button", {
-      onclick: async (e) => {
-        e.target.disabled = true; e.target.textContent = "Healing…";
-        try {
-          const rep = await (await must(await api("POST", "/gostore/admin/v1/heal"))).json();
-          toast(`Heal: ${rep.objectsHealed}/${rep.objectsScanned} objects, ${rep.shardsRewritten} shards, ${rep.metaRewritten} meta`, "ok");
-        } catch (err) { toast(err.message, "err"); }
-        e.target.disabled = false; e.target.textContent = "Run heal";
-      },
-    }, ic(ICON.refresh), "Run heal"));
+/* ============================ docs ============================ */
+function viewDoc(v, id) {
+  const d = DOCS.find((x) => x.id === id) || DOCS[0];
+  v.innerHTML = ""; v.className = "wrap docs";
+  const prose = el("div", { class: "prose" });
+  prose.append(el("h2", {}, d.title));
+  d.body(prose, { origin: location.origin, region: SERVER.region || REGION, ak: session.ak });
+  v.append(prose);
+  const idx = DOCS.indexOf(d);
+  const nav = el("div", { class: "toolbar", style: "justify-content:space-between;margin-top:40px;border-top:1px solid var(--border);padding-top:18px" });
+  nav.append(idx > 0 ? el("button", { class: "ghost", onclick: () => go("docs/" + DOCS[idx - 1].id) }, "← " + DOCS[idx - 1].title) : el("span"));
+  nav.append(idx < DOCS.length - 1 ? el("button", { class: "ghost", onclick: () => go("docs/" + DOCS[idx + 1].id) }, DOCS[idx + 1].title + " →") : el("span"));
+  v.append(nav);
+}
+const P = (t) => el("p", {}, t);
+const UL = (...items) => { const u = el("ul"); items.forEach((i) => u.append(el("li", { html: i }))); return u; };
+function TBL(head, rows) {
+  const tb = el("tbody");
+  rows.forEach((r) => tb.append(el("tr", {}, ...r.map((c) => el("td", { html: c })))));
+  return el("div", { class: "card", style: "overflow:hidden;margin:14px 0" }, el("table", {}, el("thead", {}, el("tr", {}, ...head.map((h) => el("th", {}, h)))), tb));
+}
+
+const DOCS = [
+  { id: "getting-started", icon: ICON.book, title: "Getting started", body: (c, x) => {
+    c.append(P("gostore is an S3-compatible object storage server. Anything that speaks the Amazon S3 API — the AWS CLI, the AWS SDKs, MinIO's mc, s3fs, rclone, Cyberduck — works against it. This console is served by the same process as the API."));
+    c.append(el("h3", {}, "1. Your endpoint & credentials"));
+    c.append(TBL(["Setting", "Value"], [
+      ["Endpoint URL", `<code>${x.origin}</code>`],
+      ["Region", `<code>${x.region}</code>`],
+      ["Addressing style", "<b>path-style</b> — virtual-host style is not enabled by default"],
+      ["Signature", "AWS Signature Version 4"],
+      ["Access key", `<code>${x.ak}</code> (this session)`],
+      ["Secret key", "the one you signed in with — the console never displays it"],
+    ]));
+    c.append(callout("HTTPS", "Put a TLS terminator (Caddy, nginx, your PaaS) in front of the API for production. SDKs will refuse to send credentials over plain HTTP unless you explicitly allow it.", "warn"));
+    c.append(el("h3", {}, "2. Create a bucket and upload"));
+    c.append(P("From this console: Buckets → Create bucket, then open it and drag files in. From the CLI:"));
+    c.append(codeBlock(
+`aws --endpoint-url ${x.origin} --region ${x.region} \\
+  s3 mb s3://my-bucket
+echo "hello gostore" > hello.txt
+aws --endpoint-url ${x.origin} s3 cp hello.txt s3://my-bucket/
+aws --endpoint-url ${x.origin} s3 ls s3://my-bucket
+aws --endpoint-url ${x.origin} s3 cp s3://my-bucket/hello.txt -`, "bash", "shell"));
+    c.append(el("h3", {}, "3. Next steps"));
+    c.append(UL(
+      "<a onclick=\"location.hash='#/docs/connect'\">Connect an SDK</a> — code for JS, Python, Go, Go, CLI, mc",
+      "<a onclick=\"location.hash='#/docs/presigned'\">Presigned URLs</a> — share objects without credentials",
+      "<a onclick=\"location.hash='#/docs/iam'\">IAM & policies</a> — users, service accounts, scoped access",
+      "<a onclick=\"location.hash='#/docs/versioning'\">Versioning</a>, <a onclick=\"location.hash='#/docs/object-lock'\">Object Lock</a>, <a onclick=\"location.hash='#/docs/lifecycle'\">Lifecycle</a>, <a onclick=\"location.hash='#/docs/replication'\">Replication</a>",
+    ));
+  }},
+
+  { id: "connect", icon: ICON.code, title: "Connect an SDK", body: (c, x) => {
+    c.append(P("The pattern is always the same: point the S3 client at a custom endpoint, force path-style addressing, and use SigV4 with your access/secret key. Pick your language."));
+
+    c.append(el("h3", {}, "AWS CLI"));
+    c.append(codeBlock(
+`aws configure set aws_access_key_id ${x.ak}
+aws configure set aws_secret_access_key <SECRET>
+aws configure set default.region ${x.region}
+aws configure set default.s3.addressing_style path
+# every command then just needs --endpoint-url:
+aws --endpoint-url ${x.origin} s3 ls
+aws --endpoint-url ${x.origin} s3api list-buckets`, "bash", "shell"));
+    c.append(P("Or set it once in <code>~/.aws/config</code>:"));
+    c.append(codeBlock(
+`[profile gostore]
+region = ${x.region}
+s3 =
+    addressing_style = path
+    endpoint_url = ${x.origin}
+s3api =
+    endpoint_url = ${x.origin}`, "bash", "ini"));
+
+    c.append(el("h3", {}, "JavaScript / TypeScript — @aws-sdk/client-s3 (v3)"));
+    c.append(codeBlock(
+`import { S3Client, PutObjectCommand, GetObjectCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+
+const s3 = new S3Client({
+  endpoint: "${x.origin}",
+  region: "${x.region}",
+  forcePathStyle: true,
+  credentials: { accessKeyId: "${x.ak}", secretAccessKey: process.env.GOSTORE_SECRET },
+});
+
+await s3.send(new PutObjectCommand({ Bucket: "my-bucket", Key: "a.txt", Body: "hi" }));
+const out = await s3.send(new GetObjectCommand({ Bucket: "my-bucket", Key: "a.txt" }));
+console.log(await out.Body.transformToString());
+
+const url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: "my-bucket", Key: "a.txt" }), { expiresIn: 3600 });`, "js", "javascript"));
+
+    c.append(el("h3", {}, "Python — boto3"));
+    c.append(codeBlock(
+`import boto3
+s3 = boto3.client(
+    "s3",
+    endpoint_url="${x.origin}",
+    region_name="${x.region}",
+    aws_access_key_id="${x.ak}",
+    aws_secret_access_key="SECRET",
+    config=boto3.session.Config(s3={"addressing_style": "path"}, signature_version="s3v4"),
+)
+s3.put_object(Bucket="my-bucket", Key="a.txt", Body=b"hi")
+print(s3.get_object(Bucket="my-bucket", Key="a.txt")["Body"].read())
+url = s3.generate_presigned_url("get_object", Params={"Bucket": "my-bucket", "Key": "a.txt"}, ExpiresIn=3600)`, "python", "python"));
+
+    c.append(el("h3", {}, "Go — aws-sdk-go-v2"));
+    c.append(codeBlock(
+`cfg, _ := config.LoadDefaultConfig(ctx,
+    config.WithRegion("${x.region}"),
+    config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("${x.ak}", "SECRET", "")),
+)
+s3c := s3.NewFromConfig(cfg, func(o *s3.Options) {
+    o.BaseEndpoint = aws.String("${x.origin}")
+    o.UsePathStyle = true
+})
+_, _ = s3c.PutObject(ctx, &s3.PutObjectInput{Bucket: aws.String("my-bucket"), Key: aws.String("a.txt"), Body: strings.NewReader("hi")})`, "go", "go"));
+
+    c.append(el("h3", {}, "MinIO client (mc)"));
+    c.append(codeBlock(
+`mc alias set gs ${x.origin} ${x.ak} SECRET
+mc mb gs/my-bucket
+mc cp ./file.zip gs/my-bucket/
+mc ls gs/my-bucket
+mc cat gs/my-bucket/file.zip | sha256sum`, "bash", "shell"));
+    c.append(callout("mc admin", "gostore does not implement MinIO's encrypted <code>mc admin</code> RPC. Manage users/policies from this console or the native admin API (see <a onclick=\"location.hash='#/docs/admin-api'\">Admin API</a>).", ""));
+
+    c.append(el("h3", {}, "rclone"));
+    c.append(codeBlock(
+`rclone config create gs s3 provider Other \\
+  access_key_id ${x.ak} secret_access_key SECRET \\
+  endpoint ${x.origin} region ${x.region} force_path_style true
+rclone copy ./data gs:my-bucket/data`, "bash", "shell"));
+  }},
+
+  { id: "presigned", icon: ICON.link, title: "Presigned URLs", body: (c, x) => {
+    c.append(P("A presigned URL embeds a time-limited SigV4 signature in the query string, so anyone can GET (or PUT) that one object without credentials. gostore verifies the signature and the expiry."));
+    c.append(el("h3", {}, "From the console"));
+    c.append(P("Open any object → <b>Share</b> tab → choose an expiry → <b>Generate link</b>. Max 7 days."));
+    c.append(el("h3", {}, "From an SDK"));
+    c.append(codeBlock(
+`# aws cli
+aws --endpoint-url ${x.origin} s3 presign s3://my-bucket/report.pdf --expires-in 3600`, "bash", "shell"));
+    c.append(codeBlock(
+`// JS v3
+const url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: "b", Key: "k" }), { expiresIn: 900 });
+// upload target:
+const putUrl = await getSignedUrl(s3, new PutObjectCommand({ Bucket: "b", Key: "k" }), { expiresIn: 900 });`, "js", "javascript"));
+    c.append(callout("How it verifies", "gostore checks <code>X-Amz-Algorithm=AWS4-HMAC-SHA256</code>, recomputes the signature over the canonical request with <code>UNSIGNED-PAYLOAD</code> and <code>SignedHeaders=host</code>, and rejects the request once <code>X-Amz-Date + X-Amz-Expires</code> has passed.", ""));
+  }},
+
+  { id: "operations", icon: ICON.layers, title: "Supported operations", body: (c) => {
+    c.append(P("The S3 API surface gostore implements. Anything not listed returns <code>NotImplemented</code> or is accepted-and-ignored."));
+    c.append(el("h3", {}, "Service & bucket"));
+    c.append(TBL(["Operation", "Notes"], [
+      ["ListBuckets", "GET /"],
+      ["CreateBucket / DeleteBucket / HeadBucket", "delete requires empty bucket unless <code>x-amz-force-delete</code>"],
+      ["GetBucketLocation", ""],
+      ["Get/Put/DeleteBucketPolicy", "AWS policy JSON, with Principal"],
+      ["Get/Put/DeleteBucketTagging", ""],
+      ["Get/Put/DeleteBucketCors", "drives OPTIONS preflight + response headers"],
+      ["Get/PutBucketVersioning", "Enabled / Suspended"],
+      ["Get/PutObjectLockConfiguration", "<code>?object-lock</code>, bucket default retention"],
+      ["Get/Put/DeleteBucketLifecycleConfiguration", "Expiration, NoncurrentVersionExpiration, AbortIncompleteMultipartUpload"],
+      ["Get/Put/DeleteBucketReplication", "native JSON shape (not the AWS XML)"],
+      ["Get/PutBucketNotificationConfiguration", "webhook targets, native JSON"],
+    ]));
+    c.append(el("h3", {}, "Object"));
+    c.append(TBL(["Operation", "Notes"], [
+      ["PutObject", "incl. <code>aws-chunked</code> streaming; <code>x-amz-server-side-encryption: AES256</code>"],
+      ["GetObject / HeadObject", "Range, If-Match / If-None-Match / If-*-Since, <code>?versionId</code>"],
+      ["DeleteObject / DeleteObjects", "versioned delete adds a marker; <code>x-amz-bypass-governance-retention</code>"],
+      ["CopyObject / UploadPartCopy", "<code>x-amz-metadata-directive</code>"],
+      ["ListObjectsV2 / ListObjects / ListObjectVersions", "prefix, delimiter, pagination"],
+      ["CreateMultipartUpload … CompleteMultipartUpload", "full multipart, min part 5 MiB"],
+      ["Get/Put/DeleteObjectTagging", ""],
+      ["Get/PutObjectRetention, Get/PutObjectLegalHold", "GOVERNANCE / COMPLIANCE / legal hold"],
+    ]));
+  }},
+
+  { id: "iam", icon: ICON.shield, title: "IAM & policies", body: (c, x) => {
+    c.append(P("gostore has its own identity system: a root credential (from <code>GOSTORE_ROOT_USER/PASSWORD</code>), named users, and service accounts. State is JSON replicated across the volumes — no external database."));
+    c.append(el("h3", {}, "Users & service accounts"));
+    c.append(UL(
+      "<b>User</b> — an access/secret key pair with one or more attached policies. Create from <a onclick=\"location.hash='#/keys'\">Access Keys</a> or the admin API.",
+      "<b>Service account</b> — a child credential of a user (or root). Inherits the parent's policies, optionally narrowed by an inline session policy (intersection).",
+      "<b>Root</b> — bypasses all policy checks. Use it to bootstrap, then create scoped users.",
+    ));
+    c.append(el("h3", {}, "Canned policies"));
+    c.append(el("div", { class: "optbl" }, ...[
+      ["readwrite", "s3:* on everything"], ["readonly", "Get / List only"], ["writeonly", "Put / multipart only"],
+      ["consoleAdmin", "s3:* + admin:* — full console access"], ["diagnostics", "admin:ServerInfo / StorageInfo / HealthInfo"],
+    ].map(([n, d]) => el("div", {}, el("code", {}, n), " — " + d))));
+    c.append(el("h3", {}, "Custom policy language"));
+    c.append(P("A subset of AWS IAM / bucket-policy syntax: <code>Version</code>, <code>Statement[]</code> with <code>Effect</code>, <code>Action</code> / <code>NotAction</code>, <code>Resource</code>, <code>Principal</code> (bucket policies), and <code>Condition</code> (<code>StringEquals</code>, <code>StringLike</code>, <code>IpAddress</code>, …). <code>*</code> and <code>?</code> wildcards. An explicit <code>Deny</code> always wins."));
+    c.append(codeBlock(
+`{
+  "Version": "2012-10-17",
+  "Statement": [
+    { "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:ListBucket"],
+      "Resource": ["arn:aws:s3:::team-*", "arn:aws:s3:::team-*/*"] },
+    { "Effect": "Deny",
+      "Action": ["s3:DeleteObject"],
+      "Resource": ["arn:aws:s3:::team-archive/*"] }
+  ]
+}`, "json", "policy.json"));
+    c.append(codeBlock(
+`# create a custom policy, then a user bound to it
+curl -s -X PUT "${x.origin}/gostore/admin/v1/policies?name=team-rw" \\
+  --aws-sigv4 "aws:amz:${x.region}:s3" --user "$AK:$SK" \\
+  -H "x-amz-content-sha256: UNSIGNED-PAYLOAD" \\
+  --data-binary @policy.json
+curl -s -X PUT "${x.origin}/gostore/admin/v1/users" \\
+  --aws-sigv4 "aws:amz:${x.region}:s3" --user "$AK:$SK" \\
+  -H "x-amz-content-sha256: UNSIGNED-PAYLOAD" \\
+  -d '{"accessKey":"alice","secretKey":"alicesecret1","policies":["team-rw"]}'`, "bash", "shell"));
+    c.append(el("h3", {}, "STS — temporary credentials"));
+    c.append(P("<code>POST /</code> with <code>Action=AssumeRole</code> (SigV4-signed by an existing key) returns short-lived credentials carrying your effective policy, optionally narrowed by an inline <code>Policy</code> param. <code>DurationSeconds</code> 900–43200."));
+    c.append(codeBlock(
+`aws --endpoint-url ${x.origin} sts assume-role \\
+  --role-arn arn:aws:iam::gostore:role/any --role-session-name s1 \\
+  --duration-seconds 3600`, "bash", "shell"));
+  }},
+
+  { id: "versioning", icon: ICON.layers, title: "Versioning", body: (c, x) => {
+    c.append(P("When a bucket is versioned, every PUT keeps the previous version and a DELETE (without a version id) just writes a <i>delete marker</i>. Nothing is lost until you delete a specific version."));
+    c.append(el("h3", {}, "Enable it"));
+    c.append(codeBlock(
+`aws --endpoint-url ${x.origin} s3api put-bucket-versioning \\
+  --bucket my-bucket --versioning-configuration Status=Enabled`, "bash", "shell"));
+    c.append(P("Or in the console: open the bucket → <b>Settings</b> → Versioning → Enabled."));
+    c.append(el("h3", {}, "Work with versions"));
+    c.append(codeBlock(
+`# list every version + delete marker
+aws --endpoint-url ${x.origin} s3api list-object-versions --bucket my-bucket
+
+# read a specific version
+aws --endpoint-url ${x.origin} s3api get-object \\
+  --bucket my-bucket --key a.txt --version-id <VID> out.txt
+
+# add a delete marker (object "disappears" from GET, versions kept)
+aws --endpoint-url ${x.origin} s3api delete-object --bucket my-bucket --key a.txt
+
+# permanently remove one version
+aws --endpoint-url ${x.origin} s3api delete-object \\
+  --bucket my-bucket --key a.txt --version-id <VID>`, "bash", "shell"));
+    c.append(UL(
+      "The response headers <code>x-amz-version-id</code> and <code>x-amz-delete-marker</code> tell you what happened.",
+      "<b>Suspended</b> keeps existing versions but new writes overwrite the <code>null</code> version.",
+      "Available on the single-disk and erasure backends.",
+    ));
+  }},
+
+  { id: "object-lock", icon: ICON.lock, title: "Object Lock (WORM)", body: (c, x) => {
+    c.append(P("Object Lock protects individual object <i>versions</i> from deletion or overwrite for a period of time (retention) or indefinitely (legal hold). It requires versioning and must be turned on at bucket creation."));
+    c.append(el("h3", {}, "Create a locked bucket"));
+    c.append(codeBlock(
+`aws --endpoint-url ${x.origin} s3api create-bucket \\
+  --bucket vault --object-lock-enabled-for-bucket`, "bash", "shell"));
+    c.append(P("From the console: Buckets → Create bucket → Object Lock: <i>Enabled</i>."));
+    c.append(el("h3", {}, "Retention modes"));
+    c.append(TBL(["Mode", "Behaviour"], [
+      ["GOVERNANCE", "delete/overwrite refused, <b>unless</b> the caller sends <code>x-amz-bypass-governance-retention: true</code> and has the <code>s3:BypassGovernanceRetention</code> permission"],
+      ["COMPLIANCE", "absolute — no one, including root, can delete or shorten the retention until it expires"],
+      ["Legal hold", "ON/OFF flag, independent of retention; blocks deletion while ON"],
+    ]));
+    c.append(codeBlock(
+`# put a 30-day GOVERNANCE retention on a version
+aws --endpoint-url ${x.origin} s3api put-object-retention \\
+  --bucket vault --key q4.pdf \\
+  --retention '{"Mode":"GOVERNANCE","RetainUntilDate":"2026-12-31T00:00:00Z"}'
+
+# legal hold
+aws --endpoint-url ${x.origin} s3api put-object-legal-hold \\
+  --bucket vault --key q4.pdf --legal-hold Status=ON`, "bash", "shell"));
+    c.append(callout("Erasure backend", "Object Lock works on both backends. COMPLIANCE retention can be extended but never shortened or removed.", "tip"));
+  }},
+
+  { id: "lifecycle", icon: ICON.clock, title: "Lifecycle (ILM)", body: (c, x) => {
+    c.append(P("Lifecycle rules expire objects automatically. A background scanner (hourly by default, <code>GOSTORE_SCAN_INTERVAL</code>) walks each bucket and applies its enabled rules. You can also trigger a pass from Monitoring → <i>Run lifecycle scan</i>."));
+    c.append(el("h3", {}, "Rule types"));
+    c.append(UL(
+      "<b>Expiration</b> — delete objects older than N <code>Days</code> (or past a <code>Date</code>), filtered by prefix. On versioned buckets this adds a delete marker.",
+      "<b>NoncurrentVersionExpiration</b> — permanently delete non-current versions older than N days.",
+      "<b>AbortIncompleteMultipartUpload</b> — abort multipart uploads started more than N days ago.",
+    ));
+    c.append(codeBlock(
+`<LifecycleConfiguration>
+  <Rule>
+    <ID>expire-logs</ID>
+    <Status>Enabled</Status>
+    <Filter><Prefix>logs/</Prefix></Filter>
+    <Expiration><Days>30</Days></Expiration>
+  </Rule>
+  <Rule>
+    <ID>tidy-uploads</ID>
+    <Status>Enabled</Status>
+    <Filter><Prefix></Prefix></Filter>
+    <AbortIncompleteMultipartUpload><DaysAfterInitiation>7</DaysAfterInitiation></AbortIncompleteMultipartUpload>
+  </Rule>
+</LifecycleConfiguration>`, "xml", "lifecycle.xml"));
+    c.append(codeBlock(
+`aws --endpoint-url ${x.origin} s3api put-bucket-lifecycle-configuration \\
+  --bucket my-bucket --lifecycle-configuration file://lifecycle.json`, "bash", "shell"));
+    c.append(callout("Object-locked objects", "The scanner skips any object version that is protected by retention or legal hold.", ""));
+  }},
+
+  { id: "replication", icon: ICON.branch, title: "Replication", body: (c, x) => {
+    c.append(P("Replication asynchronously copies object writes and deletes to a destination — another bucket on this server, or a remote S3-compatible endpoint (signed with its own credentials). Best-effort: 3 retries, then logged."));
+    c.append(el("h3", {}, "Configure (native JSON)"));
+    c.append(codeBlock(
+`[
+  {
+    "id": "to-backup",
+    "prefix": "important/",
+    "destBucket": "backup",
+    "destEndpoint": "",            // empty = a bucket on THIS server
+    "deleteReplication": true
+  },
+  {
+    "id": "offsite",
+    "prefix": "",
+    "destBucket": "dr-bucket",
+    "destEndpoint": "https://s3.us-west-2.amazonaws.com",
+    "destRegion": "us-west-2",
+    "destAccessKey": "AKIA...",
+    "destSecretKey": "..."
   }
-}
+]`, "json", "replication.json"));
+    c.append(codeBlock(
+`curl -s -X PUT "${x.origin}/my-bucket?replication" \\
+  --aws-sigv4 "aws:amz:${x.region}:s3" --user "$AK:$SK" \\
+  -H "x-amz-content-sha256: UNSIGNED-PAYLOAD" \\
+  --data-binary @replication.json`, "bash", "shell"));
+    c.append(P("Or paste the JSON in the bucket's <b>Settings → Replication</b> editor."));
+    c.append(callout("Secrets", "<code>GET ?replication</code> masks <code>destSecretKey</code> as <code>***</code>; re-saving with <code>***</code> keeps the stored value. There is no persistent retry queue yet.", "warn"));
+  }},
 
-// ---------- boot ---------------------------------------------
+  { id: "encryption", icon: ICON.lock, title: "Encryption at rest (SSE-S3)", body: (c, x) => {
+    c.append(P("Send <code>x-amz-server-side-encryption: AES256</code> on a PUT and gostore stores the object encrypted: a per-object AES-256 data key, wrapped by a local master key, encrypting the bytes in 64 KiB AES-GCM chunks. GET / HEAD / Range decrypt transparently."));
+    c.append(codeBlock(
+`aws --endpoint-url ${x.origin} s3api put-object \\
+  --bucket my-bucket --key secret.bin --body ./secret.bin \\
+  --server-side-encryption AES256
 
-async function verifyCreds() {
+# JS v3
+new PutObjectCommand({ Bucket: "b", Key: "k", Body: buf, ServerSideEncryption: "AES256" })`, "bash", "shell"));
+    c.append(UL(
+      "The <code>ETag</code> stays the MD5 of the <i>plaintext</i>; the reported object size is the plaintext size.",
+      "Master key: <code>GOSTORE_KMS_MASTER_KEY</code> (base64 of 32 bytes) or auto-generated to <code>.gostore.sys/kms/master.key</code>.",
+      "Set default encryption per request; a bucket-level default and SSE-KMS / SSE-C are not implemented yet. On the erasure backend, single-part PUT only.",
+    ));
+  }},
+
+  { id: "admin-api", icon: ICON.term, title: "Admin API", body: (c, x) => {
+    c.append(P("A native JSON admin API under <code>/gostore/admin/v1/</code>. Every call is SigV4-signed and requires the <code>admin:*</code> permission (the <code>consoleAdmin</code> policy, or root). This console uses it."));
+    c.append(TBL(["Method & path", "Body / query", "Purpose"], [
+      ["GET /gostore/admin/v1/info", "—", "mode, drives, capacity, counts"],
+      ["GET /gostore/admin/v1/users", "—", "list users"],
+      ["PUT /gostore/admin/v1/users", "<code>{accessKey,secretKey,policies[]}</code>", "create/update a user"],
+      ["POST /gostore/admin/v1/users/status", "<code>{accessKey,status}</code>", "enable / disable"],
+      ["DELETE /gostore/admin/v1/users?accessKey=", "—", "delete a user (+ its service accounts)"],
+      ["GET / PUT / DELETE /gostore/admin/v1/policies?name=", "policy JSON", "manage custom policies"],
+      ["GET /gostore/admin/v1/service-accounts?parentUser=", "—", "list"],
+      ["POST /gostore/admin/v1/service-accounts", "<code>{parentUser?,accessKey?,secretKey?,policy?}</code>", "create (returns the secret once)"],
+      ["DELETE /gostore/admin/v1/service-accounts?accessKey=", "—", "delete"],
+      ["POST /gostore/admin/v1/heal", "—", "reconstruct missing/corrupt shards (erasure)"],
+      ["POST /gostore/admin/v1/scanner/run", "—", "run one lifecycle pass now"],
+    ]));
+    c.append(el("h3", {}, "Example — curl with SigV4"));
+    c.append(codeBlock(
+`AK=${x.ak}; SK=<secret>
+curl -s "${x.origin}/gostore/admin/v1/info" \\
+  --aws-sigv4 "aws:amz:${x.region}:s3" --user "$AK:$SK" \\
+  -H "x-amz-content-sha256: UNSIGNED-PAYLOAD" | jq`, "bash", "shell"));
+    c.append(el("h3", {}, "Health (no auth)"));
+    c.append(codeBlock(
+`curl ${x.origin}/gostore/health/live       # process up
+curl ${x.origin}/gostore/health/ready      # storage has quorum
+curl ${x.origin}/gostore/health/selftest   # full write/read/verify/delete round-trip`, "bash", "shell"));
+  }},
+
+  { id: "cluster", icon: ICON.branch, title: "Multi-node cluster", body: (c, x) => {
+    c.append(P("gostore can spread one erasure set across several nodes. Each node runs the same binary; disks from every node form a single pool. A namespace write-lock needs a quorum (N/2+1) of nodes to grant it."));
+    c.append(el("h3", {}, "Start each node"));
+    c.append(codeBlock(
+`export GOSTORE_CLUSTER_SECRET=a-shared-secret     # same on every node
+export GOSTORE_ROOT_USER=admin GOSTORE_ROOT_PASSWORD=change-me-32chars
+
+# node1:
+GOSTORE_CLUSTER_SELF=http://node1:9000 gostore server \\
+  http://node1:9000/data/d{1...4} http://node2:9000/data/d{1...4}
+
+# node2 — identical args, only SELF changes:
+GOSTORE_CLUSTER_SELF=http://node2:9000 gostore server \\
+  http://node1:9000/data/d{1...4} http://node2:9000/data/d{1...4}`, "bash", "shell"));
+    c.append(UL(
+      "8 disks → 4 data + 4 parity → the pool survives losing a whole node.",
+      "Inter-node traffic is under <code>/gostore/internal/</code>, authed with a bearer token — run it on a private network or behind mTLS.",
+      "Point clients at any node's S3 endpoint.",
+    ));
+    c.append(callout("Current limits", "Membership is static (restart every node with the same topology). Per-node IAM / bucket config isn't shared across the cluster yet — apply user/policy changes on every node, or mount a shared config volume. No automatic rebalancing when adding nodes.", "warn"));
+  }},
+
+  { id: "limits", icon: ICON.info, title: "Limits & compatibility", body: (c) => {
+    c.append(P("gostore targets functional parity with MinIO for single-node deployments. Known gaps:"));
+    c.append(UL(
+      "<b>SSE-KMS / SSE-C</b> — only SSE-S3. Multipart SSE on the erasure backend: single-part only.",
+      "<b>IAM groups</b> and <b>OIDC / LDAP</b> STS federation.",
+      "<b>Lifecycle</b> storage-class transitions (only expiration).",
+      "<b>Replication</b> has no persistent retry queue (best-effort, 3 tries).",
+      "<b>Cluster</b>: static membership, per-node config, no rebalancing.",
+      "Virtual-host-style addressing is off by default (set <code>GOSTORE_DOMAIN</code> to enable). SigV2 is not supported — SigV4 only.",
+      "Background proactive healing — <code>heal</code> is on-demand; the scanner only does lifecycle.",
+    ));
+    c.append(callout("What definitely works", "Buckets, objects, multipart, range & conditional requests, presigned URLs, versioning, Object Lock, lifecycle expiry, tagging, bucket policies (incl. anonymous), CORS, SSE-S3, event webhooks, replication, IAM users/service-accounts/policies, STS AssumeRole, erasure coding with bitrot protection & heal, and a multi-node cluster.", "tip"));
+  }},
+];
+
+/* ============================ boot ============================ */
+async function verify() {
   const r = await api("GET", "/");
-  if (!r.ok) { const t = await r.text(); throw new Error(extractErr(t, r.status)); }
+  if (!r.ok) throw new Error(exErr(await r.text(), r.status));
 }
-function showApp() {
+async function showApp() {
   $("#login").classList.add("hidden");
   $("#app").classList.remove("hidden");
   $("#whoami").textContent = session.ak;
-  api("GET", "/gostore/admin/v1/info").then((r) => r.ok && r.json()).then((j) => j && ($("#ver").textContent = j.version)).catch(() => {});
-  setView("buckets");
+  try { SERVER = await (await api("GET", "/gostore/admin/v1/info")).json(); } catch { SERVER = {}; }
+  if (!location.hash) location.hash = "#/dashboard";
+  render();
 }
-
-$("#loginBtn").addEventListener("click", async () => {
+$("#loginBtn").onclick = async () => {
   const ak = $("#ak").value.trim(), sk = $("#sk").value.trim();
   $("#loginErr").textContent = "";
-  const btn = $("#loginBtn"); btn.disabled = true; btn.textContent = "Signing in…";
+  const b = $("#loginBtn"); b.disabled = true; b.textContent = "Signing in…";
   session.set(ak, sk);
-  try { await verifyCreds(); showApp(); }
+  try { await verify(); await showApp(); }
   catch (e) { session.clear(); $("#loginErr").textContent = e.message; }
-  finally { btn.disabled = false; btn.textContent = "Sign in"; }
-});
+  finally { b.disabled = false; b.textContent = "Sign in"; }
+};
 $("#sk").addEventListener("keydown", (e) => e.key === "Enter" && $("#loginBtn").click());
-$("#logout").addEventListener("click", () => { session.clear(); location.reload(); });
-for (const a of document.querySelectorAll("nav a[data-view]"))
-  a.addEventListener("click", (e) => { e.preventDefault(); setView(a.dataset.view); });
+$("#logout").onclick = () => { session.clear(); location.hash = ""; location.reload(); };
+$("#menuBtn").onclick = () => $("#sidenav").classList.toggle("open");
 
 if (session.ak && session.sk) api("GET", "/").then((r) => (r.ok ? showApp() : session.clear()));
