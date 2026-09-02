@@ -64,6 +64,7 @@ func (s *Server) handleDeleteBucket(w http.ResponseWriter, r *http.Request, buck
 	if s.bcfg != nil {
 		_ = s.bcfg.Delete(bucket)
 	}
+	s.ocache.evictBucket(bucket)
 	writeSuccessNoContent(w)
 }
 
@@ -264,6 +265,11 @@ func (s *Server) handleDeleteObjects(w http.ResponseWriter, r *http.Request, buc
 		objs[i] = object.ObjectToDelete{ObjectName: o.Key, VersionID: o.VersionID}
 	}
 	deleted, errs := s.obj.DeleteObjects(r.Context(), bucket, objs, object.ObjectOptions{})
+	for i := range objs {
+		if errs[i] == nil {
+			s.ocache.evict(bucket, objs[i].ObjectName, "")
+		}
+	}
 
 	res := deleteResult{XMLNS: s3XMLNS}
 	for i, o := range req.Objects {

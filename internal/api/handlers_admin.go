@@ -296,6 +296,7 @@ func (s *Server) adminEmptyBucket(w http.ResponseWriter, r *http.Request) {
 			deleted++
 		}
 	}
+	s.ocache.evictBucket(bucket)
 	writeJSON(w, http.StatusOK, map[string]any{"bucket": bucket, "deleted": deleted})
 }
 

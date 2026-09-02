@@ -77,6 +77,7 @@ func (s *Server) handlePutObjectTagging(w http.ResponseWriter, r *http.Request, 
 		writeErrorResponse(w, r, toAPIError(err), "/"+bucket+"/"+key)
 		return
 	}
+	s.ocache.evict(bucket, key, "")
 	writeSuccessOK(w)
 }
 
@@ -85,6 +86,7 @@ func (s *Server) handleDeleteObjectTagging(w http.ResponseWriter, r *http.Reques
 		writeErrorResponse(w, r, toAPIError(err), "/"+bucket+"/"+key)
 		return
 	}
+	s.ocache.evict(bucket, key, "")
 	writeSuccessNoContent(w)
 }
 

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"io"
 	"mime"
 	"net/http"
 	"net/url"
@@ -99,6 +100,21 @@ func (s *Server) handleHeadObject(w http.ResponseWriter, r *http.Request, bucket
 func (s *Server) getOrHeadObject(w http.ResponseWriter, r *http.Request, bucket, key string, withBody bool) {
 	res := "/" + bucket + "/" + key
 	gopts := s.vopts(bucket, r)
+
+	// Hot-object cache fast path: whole-object GET/HEAD of the current version,
+	// served from RAM with no backend call.
+	cacheable := gopts.VersionID == "" && r.Header.Get("Range") == ""
+	if cacheable && s.ocache.enabled() {
+		if e, ok := s.ocache.get(cacheKey(bucket, key, "")); ok {
+			if objectHasExpired(e.info.UserDefined, time.Now()) {
+				s.ocache.evict(bucket, key, "")
+			} else {
+				s.serveCached(w, r, e, withBody)
+				return
+			}
+		}
+	}
+
 	oi, err := s.obj.GetObjectInfo(r.Context(), bucket, key, gopts)
 	if err != nil {
 		if oi.DeleteMarker {
@@ -166,8 +182,46 @@ func (s *Server) getOrHeadObject(w http.ResponseWriter, r *http.Request, bucket,
 	} else {
 		w.Header().Set("Content-Length", strconv.FormatInt(oi.Size, 10))
 	}
+	// Fill the hot-object cache on a full read of an eligible small object:
+	// buffer it once, serve it, and keep the copy in RAM.
+	if rng == nil && s.ocache.eligibleSize(oi.Size) {
+		body, rerr := io.ReadAll(gr)
+		w.WriteHeader(status)
+		_, _ = w.Write(body)
+		if rerr == nil && int64(len(body)) == oi.Size {
+			s.ocache.put(cacheKey(bucket, key, ""), body, oi)
+		}
+		return
+	}
+
 	w.WriteHeader(status)
 	_, _ = bufpool.Copy(w, gr)
+}
+
+// serveCached answers a GET/HEAD entirely from a hot-object cache entry.
+func (s *Server) serveCached(w http.ResponseWriter, r *http.Request, e *cacheEntry, withBody bool) {
+	if e.info.VersionID != "" {
+		w.Header().Set("x-amz-version-id", e.info.VersionID)
+	}
+	switch evalGetConditionals(r, e.info) {
+	case http.StatusNotModified:
+		writeObjectHeaders(w, e.info, s.cfg.Region)
+		w.Header().Set("x-gostore-cache", "HIT")
+		w.WriteHeader(http.StatusNotModified)
+		return
+	case http.StatusPreconditionFailed:
+		writeErrorResponse(w, r, ErrPreconditionFailed, r.URL.Path)
+		return
+	}
+	writeObjectHeaders(w, e.info, s.cfg.Region)
+	w.Header().Set("x-gostore-cache", "HIT")
+	w.Header().Set("Content-Length", strconv.FormatInt(int64(len(e.data)), 10))
+	if !withBody {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(e.data)
 }
 
 func (s *Server) handleDeleteObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
@@ -191,6 +245,9 @@ func (s *Server) handleDeleteObject(w http.ResponseWriter, r *http.Request, buck
 // notify publishes a bucket-notification event and a replication event
 // (both no-ops when nothing is configured for the bucket).
 func (s *Server) notify(r *http.Request, kind event.Kind, bucket, key string, size int64, etag string) {
+	// Every object create/remove flows through here, so this is the single
+	// point that keeps the hot-object cache coherent with local writes.
+	s.ocache.evict(bucket, key, "")
 	if s.bus != nil {
 		s.bus.Publish(event.Event{
 			Kind: kind, Bucket: bucket, Key: key, Size: size,

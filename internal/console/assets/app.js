@@ -1355,7 +1355,8 @@ const putUrl = await getSignedUrl(s3, new PutObjectCommand({ Bucket: "b", Key: "
     c.append(TBL(["Operation", "Notes"], [
       ["PutObject", "incl. <code>aws-chunked</code> streaming; <code>x-amz-server-side-encryption: AES256</code>; conditional <code>If-None-Match: *</code> / <code>If-None-Match: &quot;etag&quot;</code> / <code>If-Match: &quot;etag&quot;</code> → 412 (optimistic concurrency)"],
       ["POST /{bucket} (POST Object)", "browser form upload (<code>multipart/form-data</code>) with a base64 <code>policy</code> + SigV4 signature; supports <code>starts-with</code>, <code>eq</code>, <code>content-length-range</code> conditions, <code>${filename}</code>, <code>success_action_redirect</code>/<code>_status</code>. Upload straight from a web page with no backend proxy."],
-      ["GetObject / HeadObject", "Range, If-Match / If-None-Match / If-*-Since, <code>?versionId</code>"],
+      ["GetObject / HeadObject", "Range, If-Match / If-None-Match / If-*-Since, <code>?versionId</code>; small hot objects served from RAM (<code>x-gostore-cache: HIT</code>)"],
+      ["Per-object TTL", "gostore extra: on PutObject, <code>X-Gostore-Expires</code> (RFC3339) or <code>X-Gostore-Expire-After</code> (<code>72h</code>, <code>7d</code>, <code>2w</code>…) — the object 404s and is deleted after that instant, no lifecycle rule needed"],
       ["DeleteObject / DeleteObjects", "versioned delete adds a marker; <code>x-amz-bypass-governance-retention</code>"],
       ["CopyObject / UploadPartCopy", "<code>x-amz-metadata-directive</code>"],
       ["ListObjectsV2 / ListObjects / ListObjectVersions", "prefix, delimiter, pagination"],
@@ -1645,6 +1646,9 @@ GOSTORE_CLUSTER_SELF=http://node2:9000 gostore server \\
       ["GOSTORE_MRF_INTERVAL", "5m", "cadence of the partial-write re-heal worker"],
       ["GOSTORE_LIST_CACHE_TTL", "15s", "per-bucket listing cache lifetime; <code>0</code> disables (re-walk every page)"],
       ["GOSTORE_FSYNC", "on", "fsync the parent directory after every object/metadata commit so it survives a power loss; set <code>0</code> to trade that for throughput"],
+      ["GOSTORE_OBJ_CACHE", "134217728", "byte budget for the in-RAM hot-object cache (whole-object GET/HEAD of small current-version objects); <code>0</code> disables"],
+      ["GOSTORE_OBJ_CACHE_MAX_OBJ", "1048576", "largest object eligible for the RAM cache"],
+      ["GOSTORE_OBJ_CACHE_TTL", "10s", "how long a cached object may be served before re-fetch (bounds staleness after a write on another cluster node)"],
     ]));
     c.append(el("h3", {}, "Built-in HTTPS (Let's Encrypt)"));
     c.append(P("Set <code>GOSTORE_TLS_DOMAIN</code> and gostore obtains and renews its own certificate — no nginx/Caddy in front. Point <code>GOSTORE_ADDRESS</code> at <code>:443</code>, publish port 80 as well (ACME HTTP-01 challenge + a redirect to https). MinIO can't do this."));

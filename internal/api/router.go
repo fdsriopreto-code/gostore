@@ -29,6 +29,7 @@ type Server struct {
 	rl   *rateLimiter
 
 	polCache *bucketPolicyCache
+	ocache   *objCache
 
 	domainNames []string
 }
@@ -47,6 +48,7 @@ func NewServer(cfg config.Config, obj object.Layer, im *iam.Manager, bc *bucketc
 		scan:     scan,
 		rl:       newRateLimiter(),
 		polCache: newBucketPolicyCache(),
+		ocache:   newObjCache(),
 	}
 	if v := strings.TrimSpace(os.Getenv("GOSTORE_DOMAIN")); v != "" {
 		for _, d := range strings.Split(v, ",") {

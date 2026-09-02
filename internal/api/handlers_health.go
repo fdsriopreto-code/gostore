@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -56,6 +57,16 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	metrics.WritePrometheus(w, g)
+
+	if s.ocache.enabled() {
+		n, bytes, hits, miss := s.ocache.stats()
+		fmt.Fprintf(w, "# HELP gostore_objcache_entries Objects held in the hot-object RAM cache.\n")
+		fmt.Fprintf(w, "# TYPE gostore_objcache_entries gauge\ngostore_objcache_entries %d\n", n)
+		fmt.Fprintf(w, "# TYPE gostore_objcache_bytes gauge\ngostore_objcache_bytes %d\n", bytes)
+		fmt.Fprintf(w, "# TYPE gostore_objcache_requests_total counter\n")
+		fmt.Fprintf(w, "gostore_objcache_requests_total{result=\"hit\"} %d\n", hits)
+		fmt.Fprintf(w, "gostore_objcache_requests_total{result=\"miss\"} %d\n", miss)
+	}
 }
 
 // handleHealthLive is a liveness probe: the process is up and serving.
