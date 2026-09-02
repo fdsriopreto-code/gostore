@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/lojadopocket/gostore/internal/erasure"
 	"github.com/lojadopocket/gostore/internal/kms"
@@ -102,7 +103,10 @@ func TestClusterErasureAcrossNodes(t *testing.T) {
 	if !bytes.Equal(got, data) {
 		t.Fatal("post-node-loss read mismatch")
 	}
-	if _, err := pool.PutObject(ctx(), "cbuck", "obj2",
+	// Bound the lock-acquire retry so the test doesn't wait the full timeout.
+	wctx, wcancel := context.WithTimeout(ctx(), time.Second)
+	defer wcancel()
+	if _, err := pool.PutObject(wctx, "cbuck", "obj2",
 		object.NewPutObjReader(bytes.NewReader(data), int64(len(data)), int64(len(data))), object.ObjectOptions{}); err == nil {
 		t.Fatal("write should fail with a node down (no write quorum)")
 	}
@@ -119,7 +123,7 @@ func TestDistributedLockMutualExclusion(t *testing.T) {
 	}
 	// second exclusive lock on the same resource must be denied (A already holds it)
 	l2 := coord.NewNSLock("bk", "key")
-	if _, err := l2.GetLock(ctx(), 0); err == nil {
+	if _, err := l2.GetLock(ctx(), 250*time.Millisecond); err == nil {
 		l2.Unlock(ctx())
 		t.Fatal("second concurrent exclusive lock should be denied")
 	}
@@ -168,4 +172,32 @@ func TestDistributedLockConcurrent(t *testing.T) {
 	if maxInside > 1 {
 		t.Fatalf("distributed lock allowed %d concurrent holders", maxInside)
 	}
+}
+
+func TestDistributedLockLossCancelsContext(t *testing.T) {
+	// Speed up the refresher for the test.
+	origRefresh, origTTL := lockRefresh, lockTTL
+	lockRefresh, lockTTL = 100*time.Millisecond, 300*time.Millisecond
+	defer func() { lockRefresh, lockTTL = origRefresh, origTTL }()
+
+	a := newNode(t, 1, 0)
+	b := newNode(t, 1, 0)
+	coord := NewLockCoordinator(a.rpc, []string{b.srv.URL}, testSecret)
+
+	l := coord.NewNSLock("bk", "key")
+	lkCtx, err := l.GetLock(ctx(), time.Second)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	// Lose quorum: with B gone, A alone (1) < quorum (2), so the next refresh
+	// tick must cancel the lock context.
+	b.srv.Close()
+
+	select {
+	case <-lkCtx.Done():
+		// good — holder is told to abort
+	case <-time.After(3 * time.Second):
+		t.Fatal("lock context was not cancelled after quorum loss")
+	}
+	l.Unlock(lkCtx)
 }

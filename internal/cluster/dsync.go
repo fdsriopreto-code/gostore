@@ -19,10 +19,15 @@ import (
 // bounded clock skew — good enough to serialise object writes, not a
 // consensus primitive.
 
-const (
+var (
 	lockTTL     = 60 * time.Second
 	lockRefresh = 20 * time.Second
-	lockTimeout = 20 * time.Second
+	lockTimeout = 10 * time.Second
+)
+
+const (
+	lockBackoffLo = 50 * time.Millisecond
+	lockBackoffHi = 1 * time.Second
 )
 
 // --- per-node lock table (the RPC server side) --------------------------
@@ -196,38 +201,66 @@ func (c *LockCoordinator) NewNSLock(bucket string, objects ...string) object.RWL
 }
 
 type distLock struct {
-	c     *LockCoordinator
-	res   string
-	token string
-	stop  chan struct{}
+	c      *LockCoordinator
+	res    string
+	token  string
+	stop   chan struct{}
+	cancel context.CancelFunc // cancels the lock context if quorum is lost
 }
 
-func (l *distLock) GetLock(ctx context.Context, _ time.Duration) (context.Context, error) {
-	return ctx, l.grab("lock", "unlock")
+func (l *distLock) GetLock(ctx context.Context, timeout time.Duration) (context.Context, error) {
+	return l.grab(ctx, timeout, "lock", "unlock")
 }
-func (l *distLock) GetRLock(ctx context.Context, _ time.Duration) (context.Context, error) {
-	return ctx, l.grab("rlock", "runlock")
+func (l *distLock) GetRLock(ctx context.Context, timeout time.Duration) (context.Context, error) {
+	return l.grab(ctx, timeout, "rlock", "runlock")
 }
 func (l *distLock) Unlock(context.Context)  { l.drop("unlock") }
 func (l *distLock) RUnlock(context.Context) { l.drop("runlock") }
 
-func (l *distLock) grab(op, undo string) error {
-	l.token = randToken()
+func (l *distLock) tryAll(op string) int {
 	grants := 0
 	for _, p := range l.c.peers {
 		if p.do(op, l.res, l.token) {
 			grants++
 		}
 	}
-	if grants < l.c.quorum {
-		for _, p := range l.c.peers {
-			p.do(undo, l.res, l.token)
-		}
-		return object.ErrWriteQuorum
+	return grants
+}
+
+// grab acquires the lock, retrying with capped exponential backoff until it
+// wins a quorum, the caller's context ends, or timeout elapses. On success it
+// returns a child context that is cancelled if the background refresher can
+// no longer confirm a quorum — so an in-flight operation that respects the
+// context is aborted instead of proceeding under a silently-lost lock.
+func (l *distLock) grab(ctx context.Context, timeout time.Duration, op, undo string) (context.Context, error) {
+	if timeout <= 0 {
+		timeout = lockTimeout
 	}
-	l.stop = make(chan struct{})
-	go l.refresher()
-	return nil
+	deadline := time.Now().Add(timeout)
+	backoff := lockBackoffLo
+	for {
+		l.token = randToken()
+		if l.tryAll(op) >= l.c.quorum {
+			lkCtx, cancel := context.WithCancel(ctx)
+			l.cancel = cancel
+			l.stop = make(chan struct{})
+			go l.refresher()
+			return lkCtx, nil
+		}
+		l.tryAll(undo) // drop partial grants before retrying
+
+		if time.Now().After(deadline) {
+			return ctx, object.ErrWriteQuorum
+		}
+		select {
+		case <-ctx.Done():
+			return ctx, ctx.Err()
+		case <-time.After(backoff):
+		}
+		if backoff *= 2; backoff > lockBackoffHi {
+			backoff = lockBackoffHi
+		}
+	}
 }
 
 func (l *distLock) drop(undo string) {
@@ -235,21 +268,30 @@ func (l *distLock) drop(undo string) {
 		close(l.stop)
 		l.stop = nil
 	}
-	for _, p := range l.c.peers {
-		p.do(undo, l.res, l.token)
+	if l.cancel != nil {
+		l.cancel() // CancelFunc is idempotent and safe to call again
 	}
+	if l.token == "" {
+		return
+	}
+	l.tryAll(undo)
 }
 
 func (l *distLock) refresher() {
+	stop, cancel := l.stop, l.cancel // set before this goroutine started
 	t := time.NewTicker(lockRefresh)
 	defer t.Stop()
 	for {
 		select {
-		case <-l.stop:
+		case <-stop:
 			return
 		case <-t.C:
-			for _, p := range l.c.peers {
-				p.do("refresh", l.res, l.token)
+			if l.tryAll("refresh") < l.c.quorum {
+				// Quorum lost: abort the holder's operation and stop.
+				if cancel != nil {
+					cancel()
+				}
+				return
 			}
 		}
 	}
