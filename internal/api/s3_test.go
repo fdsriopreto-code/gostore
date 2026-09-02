@@ -53,7 +53,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return httptest.NewServer(api.NewServer(cfg, backend, im, bc, event.New(bc), nil))
+	return httptest.NewServer(api.NewServer(cfg, backend, im, bc, event.New(bc), nil, nil))
 }
 
 // signV4 signs req (header auth) as the root test credential.

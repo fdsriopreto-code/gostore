@@ -95,3 +95,30 @@ func TestLifecycleDisabledRuleNoop(t *testing.T) {
 		t.Fatalf("disabled rule should do nothing, expired %d", rep.ObjectsExpired)
 	}
 }
+
+func TestDataUsageAccounting(t *testing.T) {
+	f, _ := fsb.New(t.TempDir())
+	_ = f.MakeBucket(ctx(), "usage", object.MakeBucketOptions{})
+	put(t, f, "usage", "a.txt", "hello", 0, object.ObjectOptions{})       // 5
+	put(t, f, "usage", "d/b.txt", "worldwide", 0, object.ObjectOptions{}) // 9
+	put(t, f, "usage", "d/e/c.txt", "xyz", 0, object.ObjectOptions{})     // 3
+
+	store, _ := bucketcfg.Open(configstore.NewDir(t.TempDir()))
+	sc := New(f, store, time.Hour)
+	if sc.Usage() != nil {
+		t.Fatal("usage should be nil before first pass")
+	}
+	sc.ScanOnce(ctx())
+
+	u := sc.Usage()
+	if u == nil {
+		t.Fatal("usage nil after scan")
+	}
+	bu := u.Buckets["usage"]
+	if bu.Objects != 3 || bu.Bytes != 17 {
+		t.Fatalf("bucket usage = %+v, want {3, 17}", bu)
+	}
+	if u.TotalObjects != 3 || u.TotalBytes != 17 {
+		t.Fatalf("totals = %d/%d, want 3/17", u.TotalObjects, u.TotalBytes)
+	}
+}

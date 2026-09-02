@@ -34,11 +34,14 @@ type ctxKeyAccessKey struct{}
 
 // NewServer builds the S3 API handler. clusterRPC, when non-nil, is mounted
 // at /gostore/internal/ for inter-node disk + lock RPC.
-func NewServer(cfg config.Config, obj object.Layer, im *iam.Manager, bc *bucketcfg.Store, bus *event.Bus, clusterRPC http.Handler) http.Handler {
+func NewServer(cfg config.Config, obj object.Layer, im *iam.Manager, bc *bucketcfg.Store, bus *event.Bus, clusterRPC http.Handler, scan *scanner.Scanner) http.Handler {
+	if scan == nil {
+		scan = scanner.New(obj, bc, 0)
+	}
 	s := &Server{
 		cfg: cfg, obj: obj, iam: im, bcfg: bc, bus: bus,
 		repl: replication.New(bc, obj),
-		scan: scanner.New(obj, bc, 0),
+		scan: scan,
 	}
 	if v := strings.TrimSpace(os.Getenv("GOSTORE_DOMAIN")); v != "" {
 		for _, d := range strings.Split(v, ",") {

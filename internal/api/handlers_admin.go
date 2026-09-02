@@ -41,6 +41,13 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		s.adminHeal(w, r)
 	case path == "scanner/run" && r.Method == http.MethodPost:
 		writeJSON(w, http.StatusOK, s.scan.ScanOnce(r.Context()))
+	case path == "datausage" && r.Method == http.MethodGet:
+		u := s.scan.Usage()
+		if u == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"pending": true})
+			return
+		}
+		writeJSON(w, http.StatusOK, u)
 	case path == "users" && r.Method == http.MethodGet:
 		writeJSON(w, http.StatusOK, s.iam.ListUsers())
 	case path == "users" && r.Method == http.MethodPut:

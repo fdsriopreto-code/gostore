@@ -277,12 +277,13 @@ func serve(cfg config.Config, obj object.Layer, clusterRPC http.Handler) error {
 	}
 	scanCtx, stopScan := context.WithCancel(context.Background())
 	defer stopScan()
-	go scanner.New(obj, bcfg, scanInterval).Run(scanCtx)
-	logger.Info("lifecycle scanner started", "interval", scanInterval)
+	scan := scanner.New(obj, bcfg, scanInterval)
+	go scan.Run(scanCtx)
+	logger.Info("background scanner started", "interval", scanInterval)
 
 	apiSrv := &http.Server{
 		Addr:              cfg.Address,
-		Handler:           api.NewServer(cfg, obj, iamMgr, bcfg, bus, clusterRPC),
+		Handler:           api.NewServer(cfg, obj, iamMgr, bcfg, bus, clusterRPC, scan),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	consoleSrv := &http.Server{

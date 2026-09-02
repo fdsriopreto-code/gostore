@@ -48,6 +48,13 @@ func (p *Pool) Heal(ctx context.Context) (HealReport, error) {
 	return rep, nil
 }
 
+// HealObject repairs a single object's missing/corrupt shards and xl.meta
+// copies in place. Implements the healer interface the scanner samples with.
+func (p *Pool) HealObject(ctx context.Context, bucket, key string) error {
+	_, _, err := p.setFor(key).healObject(ctx, bucket, key)
+	return err
+}
+
 // healObject repairs one object. Returns (metaRewrites, shardRewrites, err).
 func (s *Set) healObject(ctx context.Context, bucket, key string) (int, int, error) {
 	m, err := s.readMeta(ctx, bucket, key)
