@@ -2,7 +2,6 @@ package api
 
 import (
 	"fmt"
-	"io"
 	"mime"
 	"net/http"
 	"net/url"
@@ -12,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lojadopocket/gostore/internal/bufpool"
 	"github.com/lojadopocket/gostore/internal/event"
 	"github.com/lojadopocket/gostore/internal/object"
 	"github.com/lojadopocket/gostore/internal/replication"
@@ -129,7 +129,7 @@ func (s *Server) getOrHeadObject(w http.ResponseWriter, r *http.Request, bucket,
 		w.Header().Set("Content-Length", strconv.FormatInt(oi.Size, 10))
 	}
 	w.WriteHeader(status)
-	_, _ = io.Copy(w, gr)
+	_, _ = bufpool.Copy(w, gr)
 }
 
 func (s *Server) handleDeleteObject(w http.ResponseWriter, r *http.Request, bucket, key string) {

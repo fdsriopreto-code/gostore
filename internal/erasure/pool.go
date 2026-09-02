@@ -83,7 +83,12 @@ func (p *Pool) setFor(key string) *Set {
 
 // --- lifecycle / introspection ---------------------------------------
 
-func (p *Pool) Shutdown(context.Context) error { return nil }
+func (p *Pool) Shutdown(ctx context.Context) error {
+	if p.mrf != nil {
+		p.mrf.flush(ctx) // persist any pending self-heal work
+	}
+	return nil
+}
 
 func (p *Pool) StorageInfo(ctx context.Context) (object.StorageInfo, []error) {
 	var si object.StorageInfo

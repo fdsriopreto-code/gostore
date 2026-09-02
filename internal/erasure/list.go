@@ -9,12 +9,26 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/lojadopocket/gostore/internal/logger"
 	"github.com/lojadopocket/gostore/internal/object"
 )
 
 // walkKeysCalls counts full namespace walks; the list cache should keep this
 // flat across continuation pages. Test-only signal.
 var walkKeysCalls atomic.Int64
+
+// walkKeysMax bounds how many object keys a single namespace walk will
+// materialise in memory, so a pathologically large bucket can't OOM the
+// process. Listing then works over that (sorted) prefix of the namespace;
+// clients should narrow with a prefix. Overridable at startup.
+var walkKeysMax = 2_000_000
+
+// SetWalkKeysMax overrides the per-walk key ceiling. Call at startup.
+func SetWalkKeysMax(n int) {
+	if n > 0 {
+		walkKeysMax = n
+	}
+}
 
 // walkKeys returns every object key in the bucket (slash-separated, sorted).
 // An object is any directory that directly contains an xl.meta file. It
@@ -29,8 +43,13 @@ func (s *Set) walkKeys(ctx context.Context, bucket string) ([]string, error) {
 			continue
 		}
 		online++
+		var capped bool
 		var rec func(prefix string) error
 		rec = func(prefix string) error {
+			if len(found) >= walkKeysMax {
+				capped = true
+				return nil
+			}
 			entries, err := disk.ListDir(ctx, bucket, prefix)
 			if err != nil {
 				return err
@@ -57,6 +76,10 @@ func (s *Set) walkKeys(ctx context.Context, bucket string) ([]string, error) {
 			return nil
 		}
 		_ = rec("")
+		if capped {
+			logger.Warn("erasure: bucket namespace exceeds the walk ceiling; listing is truncated — use a prefix",
+				"bucket", bucket, "ceiling", walkKeysMax)
+		}
 	}
 	if online == 0 {
 		return nil, ErrReadQuorum

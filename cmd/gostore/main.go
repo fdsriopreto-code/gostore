@@ -152,6 +152,7 @@ func runServer(args []string) error {
 		}
 		applyInlineMax()
 		applyListCacheTTL()
+		applyWalkKeysMax()
 		set, err := erasure.NewSet(spec.Disks)
 		if err != nil {
 			return fmt.Errorf("cluster erasure set: %w", err)
@@ -199,6 +200,7 @@ func runServer(args []string) error {
 	}
 	applyInlineMax()
 	applyListCacheTTL()
+	applyWalkKeysMax()
 
 	if cfg.SingleDisk() {
 		backend, err := fsbackend.New(cfg.VolumeGroups[0][0])
@@ -453,6 +455,19 @@ func applyListCacheTTL() {
 	}
 	erasure.SetListCacheTTL(d)
 	logger.Info("list cache TTL set", "ttl", d)
+}
+
+// applyWalkKeysMax honours GOSTORE_LIST_MAX_KEYS — the ceiling on how many
+// object keys one namespace walk materialises (OOM guard for huge buckets).
+func applyWalkKeysMax() {
+	v := os.Getenv("GOSTORE_LIST_MAX_KEYS")
+	if v == "" {
+		return
+	}
+	if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		erasure.SetWalkKeysMax(n)
+		logger.Info("namespace walk key ceiling set", "max", n)
+	}
 }
 
 func modeString(c config.Config) string {

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lojadopocket/gostore/internal/bufpool"
 	"github.com/lojadopocket/gostore/internal/storage"
 )
 
@@ -105,7 +106,7 @@ func (s *RPCServer) handleDisk(w http.ResponseWriter, r *http.Request) {
 		}
 		defer rc.Close()
 		w.Header().Set("Content-Type", "application/octet-stream")
-		_, _ = io.Copy(w, rc)
+		_, _ = bufpool.Copy(w, rc)
 		return
 	}
 
