@@ -511,8 +511,13 @@ async function bucketObjects(v, b) {
   const fd = el("input", { type: "file", multiple: "true", style: "display:none" });
   fd.webkitdirectory = true;
   fd.onchange = () => doUpload(b, [...fd.files].map((f) => ({ file: f, path: f.webkitRelativePath || f.name })));
+  const sInput = el("input", {
+    placeholder: "Filter this folder — press Enter to search the whole bucket",
+    oninput: (e) => filterRows(e.target.value),
+    onkeydown: (e) => { if (e.key === "Enter" && e.target.value.trim()) bucketSearch(b, e.target.value.trim()); },
+  });
   const tb = el("div", { class: "toolbar" },
-    el("div", { class: "search" }, ic(ICON.search), el("input", { placeholder: "Filter this folder…", oninput: (e) => filterRows(e.target.value) })),
+    el("div", { class: "search" }, ic(ICON.search), sInput),
     el("button", { class: "ghost", onclick: render }, ic(ICON.refresh)),
     el("div", { class: "grow" }),
     el("button", { class: "ghost", onclick: () => fd.click() }, ic(ICON.folder), "Upload folder"), fd,
@@ -590,6 +595,42 @@ function filterRows(q) {
   q = q.toLowerCase();
   document.querySelectorAll("#view tbody tr[data-name]").forEach((tr) => { tr.style.display = !q || tr.dataset.name.includes(q) ? "" : "none"; });
 }
+
+// bucketSearch walks the ENTIRE bucket (all prefixes) and lists matches.
+async function bucketSearch(b, term) {
+  const t0 = term.toLowerCase();
+  const v = $("#view");
+  v.innerHTML = "";
+  pageHeader(v, "Search: " + term, "in bucket " + b, [
+    el("button", { class: "ghost", onclick: render }, ic(ICON.arrowLeft), "Back to browser"),
+  ]);
+  const status = el("p", { class: "muted small" }, "Scanning…");
+  v.append(status);
+  const hits = []; let token = "", scanned = 0;
+  try {
+    do {
+      const q = { "list-type": "2", "max-keys": "1000" };
+      if (token) q["continuation-token"] = token;
+      const doc = parseXml(await (await api("GET", "/" + b, { query: q })).text());
+      for (const c of doc.getElementsByTagName("Contents")) {
+        const k = t(c, "Key"); scanned++;
+        if (k.toLowerCase().includes(t0)) hits.push({ key: k, size: +t(c, "Size"), lm: t(c, "LastModified"), etag: t(c, "ETag").replace(/"/g, "") });
+      }
+      token = t(doc, "IsTruncated") === "true" ? t(doc, "NextContinuationToken") : "";
+      status.textContent = `Scanned ${scanned}, ${hits.length} match${hits.length === 1 ? "" : "es"}…`;
+    } while (token && scanned < 50000 && hits.length < 1000);
+  } catch (e) { status.textContent = "Search failed: " + e.message; return; }
+  status.textContent = `${hits.length} match${hits.length === 1 ? "" : "es"} in ${scanned} objects` + (scanned >= 50000 ? " (stopped at 50k)" : "");
+  if (!hits.length) { v.append(emptyState(ICON.search, "No matches", "Nothing in " + b + " contains “" + term + "”.")); return; }
+  const tb = el("tbody");
+  for (const o of hits) tb.append(el("tr", { class: "clk", onclick: () => objectDrawer(b, o) },
+    el("td", {}, nameCell(b, o.key, o.key)),
+    el("td", { class: "muted" }, relTime(o.lm)),
+    el("td", { class: "num" }, fmtSize(o.size)),
+    el("td", { class: "act" }, el("button", { class: "ghost iconbtn", title: "Download", onclick: (e) => { e.stopPropagation(); dl(b, o.key); } }, ic(ICON.down)))));
+  v.append(el("div", { class: "card" }, el("table", {}, el("thead", {}, el("tr", {},
+    el("th", {}, "Key"), el("th", {}, "Modified"), el("th", {}, "Size"), el("th", {}))), tb)));
+}
 // dropEntries turns a drop DataTransfer into [{file, path}], walking dropped
 // directories (webkitGetAsEntry must be called synchronously here).
 function dropEntries(dt) {
@@ -661,6 +702,17 @@ async function objectDrawer(b, o) {
         el("div", { class: "k" }, "ETag"), el("div", { class: "v" }, el("code", {}, o.etag))));
       c.append(el("div", { class: "row" },
         el("button", { class: "primary", onclick: () => dl(b, o.key) }, ic(ICON.down), "Download"),
+        el("button", { class: "ghost", onclick: async () => {
+          const nk = prompt("Move / rename to (full key within the bucket):", o.key);
+          if (!nk || nk === o.key) return;
+          try {
+            await must(await api("PUT", "/" + b + "/" + nk, {
+              extraHeaders: { "x-amz-copy-source": "/" + b + "/" + encP(o.key) },
+            }));
+            await must(await api("DELETE", "/" + b + "/" + o.key));
+            toast("Moved to " + nk, "ok"); closeDrawer(); render();
+          } catch (e) { toast(e.message, "err"); }
+        } }, ic(ICON.folder), "Move / rename"),
         el("button", { class: "danger", onclick: async () => {
           if (!confirm("Delete " + o.key + "?")) return;
           try { await must(await api("DELETE", "/" + b + "/" + o.key)); toast("Deleted", "ok"); closeDrawer(); render(); } catch (e) { toast(e.message, "err"); }
