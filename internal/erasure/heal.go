@@ -5,6 +5,8 @@ import (
 	"context"
 	"io"
 	"path"
+
+	"github.com/lojadopocket/gostore/internal/logger"
 )
 
 // HealReport summarises a heal pass.
@@ -46,6 +48,64 @@ func (p *Pool) Heal(ctx context.Context) (HealReport, error) {
 		}
 	}
 	return rep, nil
+}
+
+// AutoHeal detects an online disk that is missing buckets its peers hold —
+// typically a freshly-added or replaced disk — and, if found, recreates the
+// bucket set on every disk and kicks off a full background heal so the new
+// disk is repopulated without operator action.
+func (p *Pool) AutoHeal(ctx context.Context) {
+	fresh := false
+	for _, s := range p.sets {
+		present := make([]map[string]bool, len(s.disks))
+		union := map[string]int{}
+		online := 0
+		for i, d := range s.disks {
+			if !d.IsOnline() {
+				continue
+			}
+			online++
+			vols, err := d.ListVols(ctx)
+			if err != nil {
+				continue
+			}
+			m := map[string]bool{}
+			for _, v := range vols {
+				if v.Name == "" || v.Name == ".gostore.sys" {
+					continue
+				}
+				m[v.Name] = true
+				union[v.Name]++
+			}
+			present[i] = m
+		}
+		for name, c := range union {
+			if c >= online {
+				continue
+			}
+			for i, d := range s.disks {
+				if d.IsOnline() && present[i] != nil && !present[i][name] {
+					fresh = true
+					_ = s.MakeBucket(ctx, name) // tolerates already-exists
+				}
+			}
+		}
+	}
+	if !fresh {
+		return
+	}
+	logger.Info("auto-heal: under-populated disk detected, starting background heal pass")
+	go func() {
+		rep, err := p.Heal(context.Background())
+		if err != nil {
+			logger.Warn("auto-heal pass failed", "err", err)
+			return
+		}
+		logger.Info("auto-heal pass complete",
+			"objectsHealed", rep.ObjectsHealed,
+			"shardsRewritten", rep.ShardsRewritten,
+			"metaRewritten", rep.MetaRewritten)
+	}()
 }
 
 // HealObject repairs a single object's missing/corrupt shards and xl.meta
