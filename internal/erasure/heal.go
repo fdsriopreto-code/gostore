@@ -129,6 +129,20 @@ func (s *Set) healObject(ctx context.Context, bucket, key string) (int, int, err
 	if err != nil {
 		return 0, 0, err
 	}
+	origRev := m.Revision
+
+	// Fencing: heal's repair plan is built from the object as it was at
+	// origRev. If a client write lands mid-heal (bumping the revision) our
+	// reconstructed shards would belong to the *old* content — writing them
+	// would corrupt the new object. Bail; the new write is authoritative and
+	// MRF/scrub will re-check it.
+	changed := func() bool {
+		cur, e := s.readMeta(ctx, bucket, key)
+		return e == nil && cur.Revision != origRev
+	}
+	if changed() {
+		return 0, 0, nil
+	}
 
 	metaFixed := 0
 	for _, d := range s.disks {
@@ -163,6 +177,9 @@ func (s *Set) healObject(ctx context.Context, bucket, key string) (int, int, err
 		}
 		if len(s.disks)-len(bad) < m.Erasure.DataBlocks {
 			return metaFixed, shardFixed, ErrReadQuorum
+		}
+		if changed() { // re-check before each part's rebuild
+			return metaFixed, shardFixed, nil
 		}
 		for _, di := range bad {
 			if s.rebuildShard(ctx, bucket, partPath, pi, di, pm, m, dist, fullShard) == nil {

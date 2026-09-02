@@ -37,6 +37,35 @@ func TestLockTableStaleReadUnlockIsIgnored(t *testing.T) {
 	}
 }
 
+// TestLockTableFencesStaleToken: a stalled exclusive holder that comes back
+// after its lock was reassigned (and expired) must not re-acquire with its
+// now-stale token.
+func TestLockTableFencesStaleToken(t *testing.T) {
+	tb := newLockTable()
+
+	stale := randToken() // issued first -> lower sequence
+	fresh := randToken() // issued second -> higher sequence
+
+	if !tb.acquire("b/k", stale, true) {
+		t.Fatal("stale holder should get the lock initially")
+	}
+	// Its lock expires and the fresh holder takes over.
+	tb.m["b/k"].expiry = tb.m["b/k"].expiry.Add(-2 * lockTTL)
+	if !tb.acquire("b/k", fresh, true) {
+		t.Fatal("fresh holder should acquire after expiry")
+	}
+	// Fresh holder's lock also lapses...
+	tb.m["b/k"].expiry = tb.m["b/k"].expiry.Add(-2 * lockTTL)
+	// ...and the original, resurrected holder tries again with its old token.
+	if tb.acquire("b/k", stale, true) {
+		t.Fatal("a token older than the highest granted must be fenced out")
+	}
+	// A brand-new token still works.
+	if !tb.acquire("b/k", randToken(), true) {
+		t.Fatal("a newer token should still acquire the free slot")
+	}
+}
+
 // TestLockTableSharedRefcount confirms multi-reader shared locks are released
 // only when the last distinct reader unlocks.
 func TestLockTableSharedRefcount(t *testing.T) {

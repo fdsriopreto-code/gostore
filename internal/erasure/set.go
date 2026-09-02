@@ -278,7 +278,7 @@ func (s *Set) putObjectSSE(ctx context.Context, bucket, key string, parts []part
 		meta.NoncePrefix = hex.EncodeToString(sp.prefix)
 	}
 
-	m, err := s.commitMeta(ctx, staging, bucket, key, meta)
+	m, err := s.commitMeta(ctx, staging, bucket, key, meta, -1)
 	if err == nil && shardsPartial && s.mrf != nil && bucket != "" {
 		s.mrf(bucket, key)
 	}
@@ -325,21 +325,33 @@ func (s *Set) putObjectInline(ctx context.Context, staging, bucket, key string, 
 		meta.EncDEK = sp.encDEK
 		meta.NoncePrefix = hex.EncodeToString(sp.prefix)
 	}
-	return s.commitMeta(ctx, staging, bucket, key, meta)
+	return s.commitMeta(ctx, staging, bucket, key, meta, -1)
 }
 
 // commitMeta writes an identical xl.meta to every disk's staging dir and
 // atomically renames staging -> bucket/key on a write quorum.
-func (s *Set) commitMeta(ctx context.Context, staging, bucket, key string, meta *XLMeta) (*XLMeta, error) {
-	mb, err := meta.marshal()
-	if err != nil {
-		return nil, err
-	}
+func (s *Set) commitMeta(ctx context.Context, staging, bucket, key string, meta *XLMeta, expectRev int64) (*XLMeta, error) {
 	// The commit must not outlive the namespace lock — bound each metadata op
 	// so one hung disk can't leave the write half-done past the lock's TTL
 	// (which would let a second writer in).
 	dctx, dcancel := withDiskDeadline(ctx)
 	defer dcancel()
+
+	// Read the current revision (0 if the object is new). A fenced caller
+	// (expectRev >= 0) aborts if it moved — its plan is based on stale state.
+	var curRev uint64
+	if prev, perr := s.readMeta(dctx, bucket, key); perr == nil {
+		curRev = prev.Revision
+	}
+	if expectRev >= 0 && curRev != uint64(expectRev) {
+		return nil, ErrWriteConflict
+	}
+	meta.Revision = curRev + 1
+
+	mb, err := meta.marshal()
+	if err != nil {
+		return nil, err
+	}
 	metaErrs := s.forEachDisk(func(d Disk) error {
 		return d.WriteAll(dctx, "", path.Join(staging, metaFile), mb)
 	})
@@ -503,8 +515,13 @@ func (s *Set) readMeta(ctx context.Context, bucket, key string) (*XLMeta, error)
 		}
 		best, bestN := "", 0
 		for h, c := range tally {
-			if c > bestN {
+			switch {
+			case c > bestN:
 				best, bestN = h, c
+			case c == bestN && best != "" && sample[h].Revision > sample[best].Revision:
+				// Count tie: the higher revision is the newer write — this
+				// makes readMeta deterministic instead of map-order arbitrary.
+				best = h
 			}
 		}
 		return sample[best], bestN, have

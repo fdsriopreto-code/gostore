@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -41,15 +42,27 @@ type hold struct {
 }
 
 type lockTable struct {
-	mu sync.Mutex
-	m  map[string]*hold
+	mu   sync.Mutex
+	m    map[string]*hold
+	high map[string]uint64 // highest exclusive-token seq ever granted per resource
 }
 
-func newLockTable() *lockTable { return &lockTable{m: map[string]*hold{}} }
+func newLockTable() *lockTable {
+	return &lockTable{m: map[string]*hold{}, high: map[string]uint64{}}
+}
 
 func (t *lockTable) acquire(res, token string, exclusive bool) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	// Fencing: never hand an exclusive lock to a token older than one already
+	// granted for this resource. Stops a stalled holder that comes back after
+	// its lock was reassigned (and has since expired) from re-acquiring with
+	// its stale token and clobbering newer state.
+	if exclusive && tokenSeqOf(token) < t.high[res] {
+		return false
+	}
+
 	h := t.m[res]
 	if h != nil && time.Now().After(h.expiry) {
 		h = nil // expired holder — the slot is free
@@ -58,6 +71,8 @@ func (t *lockTable) acquire(res, token string, exclusive bool) bool {
 		nh := &hold{token: token, exclusive: exclusive, expiry: time.Now().Add(lockTTL)}
 		if !exclusive {
 			nh.readers = map[string]struct{}{token: {}}
+		} else if s := tokenSeqOf(token); s > t.high[res] {
+			t.high[res] = s
 		}
 		t.m[res] = nh
 		return true
@@ -86,6 +101,7 @@ func (t *lockTable) release(res, token string, exclusive bool) {
 	if exclusive {
 		if h.exclusive && h.token == token {
 			delete(t.m, res)
+			delete(t.high, res) // quiet resource: drop the fence highwater
 		}
 		return
 	}
@@ -331,8 +347,28 @@ func (l *distLock) refresher() {
 	}
 }
 
+// tokenSeq is a process-wide monotonic counter. A lock token is
+// "<seq>-<random>" so it is both unique and ordered: the lock table can tell a
+// newer grant from an older one and reject a stale holder that comes back
+// (GC pause, network stall) after its lock was reassigned — the classic
+// distributed-lock fencing problem.
+var tokenSeq atomic.Uint64
+
 func randToken() string {
-	var b [16]byte
+	var b [12]byte
 	_, _ = rand.Read(b[:])
-	return hex.EncodeToString(b[:])
+	return strconv.FormatUint(tokenSeq.Add(1), 36) + "-" + hex.EncodeToString(b[:])
+}
+
+// tokenNewer reports whether token a was issued after token b (by sequence).
+func tokenNewer(a, b string) bool {
+	return tokenSeqOf(a) > tokenSeqOf(b)
+}
+
+func tokenSeqOf(tok string) uint64 {
+	if i := strings.IndexByte(tok, '-'); i > 0 {
+		n, _ := strconv.ParseUint(tok[:i], 36, 64)
+		return n
+	}
+	return 0
 }

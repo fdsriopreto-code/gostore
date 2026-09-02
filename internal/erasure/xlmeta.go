@@ -18,6 +18,12 @@ type XLMeta struct {
 	Version int         `json:"version"`
 	Erasure ErasureMeta `json:"erasure"`
 
+	// Revision is a per-object monotonic counter bumped on every write. It
+	// makes majority-wins deterministic on a count tie (higher wins) and lets
+	// heal / read-modify-write abort when the object changed under them
+	// (fencing against a stale writer whose lock expired).
+	Revision uint64 `json:"rev,omitempty"`
+
 	Size    int64     `json:"size"`
 	ModTime time.Time `json:"modTime"`
 	ETag    string    `json:"etag"`

@@ -26,6 +26,7 @@ var (
 	ErrBitrot         = errors.New("erasure: shard failed bitrot check")
 	ErrCorrupt        = errors.New("erasure: object metadata corrupt or inconsistent")
 	ErrObjectMismatch = errors.New("erasure: assembled object failed checksum verification")
+	ErrWriteConflict  = errors.New("erasure: object changed under a fenced write")
 )
 
 // Disk is the subset of per-disk operations the erasure layer needs. It is
