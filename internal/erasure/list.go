@@ -6,15 +6,21 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"github.com/lojadopocket/gostore/internal/object"
 )
+
+// walkKeysCalls counts full namespace walks; the list cache should keep this
+// flat across continuation pages. Test-only signal.
+var walkKeysCalls atomic.Int64
 
 // walkKeys returns every object key in the bucket (slash-separated, sorted).
 // An object is any directory that directly contains an xl.meta file. It
 // unions the namespace across every online disk so a disk that is missing
 // some objects does not hide them from listings or healing.
 func (s *Set) walkKeys(ctx context.Context, bucket string) ([]string, error) {
+	walkKeysCalls.Add(1)
 	found := map[string]struct{}{}
 	online := 0
 	for _, disk := range s.disks {
@@ -101,21 +107,11 @@ func (p *Pool) doList(ctx context.Context, bucket string, lp listParams) (listPa
 	}
 
 	// Objects are spread across sets by key hash — gather from every set.
-	owner := map[string]*Set{}
-	for _, set := range p.sets {
-		ks, err := set.walkKeys(ctx, bucket)
-		if err != nil {
-			return listPage{}, err
-		}
-		for _, k := range ks {
-			owner[k] = set
-		}
+	// Cached per bucket for a short TTL so continuation pages skip the walk.
+	keys, owner, err := p.namespaceKeys(ctx, bucket)
+	if err != nil {
+		return listPage{}, err
 	}
-	keys := make([]string, 0, len(owner))
-	for k := range owner {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
 
 	var page listPage
 	seen := map[string]bool{}

@@ -20,6 +20,7 @@ type Pool struct {
 	kms    kmsWrapper
 	locker func(bucket string, objects ...string) object.RWLocker
 	mrf    *mrfQueue
+	lcache *listCache
 
 	nsMu   sync.Mutex
 	nsLock map[string]*sync.RWMutex
@@ -32,7 +33,7 @@ func NewPool(sets ...*Set) (*Pool, error) {
 	if len(sets) == 0 {
 		return nil, errors.New("erasure: no sets")
 	}
-	return &Pool{sets: sets, nsLock: map[string]*sync.RWMutex{}}, nil
+	return &Pool{sets: sets, nsLock: map[string]*sync.RWMutex{}, lcache: newListCache()}, nil
 }
 
 // FromDisks is the common case: build a single set (and pool) from n disks.
@@ -188,6 +189,7 @@ func (p *Pool) DeleteBucket(ctx context.Context, bucket string, opts object.Dele
 // --- objects ------------------------------------------------------
 
 func (p *Pool) PutObject(ctx context.Context, bucket, key string, data *object.PutObjReader, opts object.ObjectOptions) (object.ObjectInfo, error) {
+	defer p.invalidateList(bucket)
 	if opts.Versioned || opts.VersionSuspended {
 		return p.putObjectVersioned(ctx, bucket, key, data, opts)
 	}
@@ -319,6 +321,7 @@ func (rc readCloser) Read(p []byte) (int, error) { return rc.r.Read(p) }
 func (rc readCloser) Close() error               { return rc.c.Close() }
 
 func (p *Pool) DeleteObject(ctx context.Context, bucket, key string, opts object.ObjectOptions) (object.ObjectInfo, error) {
+	defer p.invalidateList(bucket)
 	if err := p.ensureBucket(ctx, bucket); err != nil {
 		return object.ObjectInfo{}, err
 	}
@@ -335,6 +338,7 @@ func (p *Pool) DeleteObject(ctx context.Context, bucket, key string, opts object
 }
 
 func (p *Pool) DeleteObjects(ctx context.Context, bucket string, objs []object.ObjectToDelete, opts object.ObjectOptions) ([]object.DeletedObject, []error) {
+	defer p.invalidateList(bucket)
 	deleted := make([]object.DeletedObject, len(objs))
 	errs := make([]error, len(objs))
 	for i, o := range objs {
@@ -348,6 +352,7 @@ func (p *Pool) DeleteObjects(ctx context.Context, bucket string, objs []object.O
 }
 
 func (p *Pool) CopyObject(ctx context.Context, srcBucket, srcObject, dstBucket, dstObject string, _ object.ObjectInfo, _, dstOpts object.ObjectOptions) (object.ObjectInfo, error) {
+	defer p.invalidateList(dstBucket)
 	src, err := p.GetObjectNInfo(ctx, srcBucket, srcObject, nil, nil, object.ObjectOptions{})
 	if err != nil {
 		return object.ObjectInfo{}, err

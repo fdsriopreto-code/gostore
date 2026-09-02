@@ -256,6 +256,7 @@ func (p *Pool) AbortMultipartUpload(ctx context.Context, bucket, key, uploadID s
 }
 
 func (p *Pool) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadID string, uploaded []object.CompletePart, _ object.ObjectOptions) (object.ObjectInfo, error) {
+	defer p.invalidateList(bucket)
 	ui, set, err := p.loadUpload(ctx, uploadID)
 	if err != nil {
 		return object.ObjectInfo{}, err

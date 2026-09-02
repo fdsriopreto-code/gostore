@@ -143,6 +143,7 @@ func runServer(args []string) error {
 			return fmt.Errorf("init KMS: %w", err)
 		}
 		applyInlineMax()
+		applyListCacheTTL()
 		set, err := erasure.NewSet(spec.Disks)
 		if err != nil {
 			return fmt.Errorf("cluster erasure set: %w", err)
@@ -189,6 +190,7 @@ func runServer(args []string) error {
 		return fmt.Errorf("init KMS: %w", err)
 	}
 	applyInlineMax()
+	applyListCacheTTL()
 
 	if cfg.SingleDisk() {
 		backend, err := fsbackend.New(cfg.VolumeGroups[0][0])
@@ -341,6 +343,22 @@ func applyInlineMax() {
 	}
 	erasure.SetInlineMax(n)
 	logger.Info("inline object threshold set", "bytes", n)
+}
+
+// applyListCacheTTL honours GOSTORE_LIST_CACHE_TTL (a duration; 0 disables)
+// for the erasure backend's per-bucket namespace-listing cache.
+func applyListCacheTTL() {
+	v := os.Getenv("GOSTORE_LIST_CACHE_TTL")
+	if v == "" {
+		return
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		logger.Warn("ignoring invalid GOSTORE_LIST_CACHE_TTL", "value", v)
+		return
+	}
+	erasure.SetListCacheTTL(d)
+	logger.Info("list cache TTL set", "ttl", d)
 }
 
 func modeString(c config.Config) string {
