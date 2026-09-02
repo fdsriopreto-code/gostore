@@ -633,6 +633,18 @@ func (s *Set) readPart(ctx context.Context, bucket, key string, meta *XLMeta, pm
 		vh = md5.New()
 	}
 
+	// Buffers reused across every stripe of this part: one shard-sized slab per
+	// disk (resliced for the short final stripe), a header buffer, and the
+	// decode output. A large multi-stripe GET no longer allocates per stripe.
+	n := s.n()
+	scratch := make([][]byte, n)
+	for j := range scratch {
+		scratch[j] = make([]byte, fullShard)
+	}
+	shards := make([][]byte, n)
+	hbuf := make([]byte, hdr)
+	var stripeBuf bytes.Buffer
+
 	for partRemaining > 0 && *remaining > 0 {
 		thisStripeLogical := stripeLen
 		if partRemaining < stripeLen {
@@ -640,23 +652,23 @@ func (s *Set) readPart(ctx context.Context, bucket, key string, meta *XLMeta, pm
 		}
 		thisShardLen := ceilInt64(thisStripeLogical, int64(meta.Erasure.DataBlocks))
 
-		shards := make([][]byte, s.n())
+		for j := range shards {
+			shards[j] = nil
+		}
 		have := 0
-		for j := 0; j < s.n(); j++ {
+		for j := 0; j < n; j++ {
 			di := dist[j]
 			rd := readers[di]
 			if rd == nil {
 				continue
 			}
-			var hbuf []byte
 			if hdr > 0 {
-				hbuf = make([]byte, hdr)
 				if _, err := io.ReadFull(rd, hbuf); err != nil {
 					readers[di] = nil
 					continue
 				}
 			}
-			buf := make([]byte, thisShardLen)
+			buf := scratch[j][:thisShardLen]
 			if _, err := io.ReadFull(rd, buf); err != nil {
 				readers[di] = nil
 				continue
@@ -679,7 +691,7 @@ func (s *Set) readPart(ctx context.Context, bucket, key string, meta *XLMeta, pm
 			return ErrReadQuorum
 		}
 
-		var stripeBuf bytes.Buffer
+		stripeBuf.Reset()
 		if err := s.ec.DecodeData(shards, int(thisStripeLogical), &stripeBuf); err != nil {
 			return err
 		}
