@@ -40,6 +40,42 @@ func (s *Server) handleHealthReady(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handlePersistence reports whether the data directory looks persistent. It
+// is unauthenticated (health namespace) so you can check it from a browser
+// after a redeploy: if buckets/objects/keys keep vanishing and this shows
+// volumeWasEmptyAtBoot=true on every boot with a fresh dataInitialized
+// timestamp, the volume mounted at dataDir is not persistent.
+func (s *Server) handlePersistence(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	out := map[string]any{}
+
+	if d, ok := s.obj.(interface {
+		DataDir() string
+		FormatCreated() string
+		FreshlyFormatted() bool
+	}); ok {
+		out["dataDir"] = d.DataDir()
+		out["dataInitialized"] = d.FormatCreated()
+		out["volumeWasEmptyAtBoot"] = d.FreshlyFormatted()
+	}
+
+	buckets, _ := s.obj.ListBuckets(ctx)
+	out["buckets"] = len(buckets)
+	out["users"] = len(s.iam.ListUsers())
+	out["serviceAccounts"] = len(s.iam.ListServiceAccounts(""))
+
+	hint := "looks OK"
+	if fresh, _ := out["volumeWasEmptyAtBoot"].(bool); fresh {
+		hint = "the data directory was EMPTY when gostore started. If this is not your very first boot, the volume mounted at dataDir is NOT persistent — mount a named volume / persistent disk to it and keep that mount across deploys."
+	}
+	out["hint"] = hint
+
+	w.Header().Set("Content-Type", "application/json")
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(out)
+}
+
 // handleSelfTest runs a full write/read/verify/delete round-trip through the
 // object layer and reports the outcome as JSON. It lets you validate a
 // deployment from a browser when you have no shell / S3 client on the host.

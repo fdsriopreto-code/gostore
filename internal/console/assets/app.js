@@ -321,9 +321,11 @@ async function viewDashboard(v) {
       el("b", {}, "This volume was empty when gostore started"),
       el("span", { html:
         "If this is your first run, ignore it. But if buckets or access keys keep disappearing after a restart/redeploy, "
-        + "the data directory <code>" + (info.dataDir || "/data") + "</code> is <b>not persistent</b> — "
-        + "mount a named volume / persistent disk to it and keep that mount across deploys. "
-        + "Everything (objects, metadata, IAM) lives there; there is no external database." })));
+        + "the data directory <code>" + (info.dataDir || "/data") + "</code> is <b>not persistent</b>. Everything "
+        + "(objects, metadata, IAM) lives there — there is no external database. "
+        + "<b>Fix:</b> in your PaaS/Docker config add a <b>persistent volume mount</b> at <code>"
+        + (info.dataDir || "/data") + "</code> and keep that same volume across deploys. "
+        + "Check the live state any time at <code>" + location.origin + "/gostore/health/persistence</code>." })));
   }
 
   v.append(el("h3", { style: "margin:26px 0 4px;font-size:15px" }, "Quick start"));
