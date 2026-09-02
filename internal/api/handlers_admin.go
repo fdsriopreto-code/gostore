@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/lojadopocket/gostore/internal/cluster"
 	"github.com/lojadopocket/gostore/internal/erasure"
 	"github.com/lojadopocket/gostore/internal/iam"
 	"github.com/lojadopocket/gostore/internal/iam/policy"
@@ -64,6 +65,18 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusAccepted, map[string]any{"started": true})
 	case path == "readonly":
 		s.handleAdminReadOnly(w, r)
+	case path == "cluster" && r.Method == http.MethodGet:
+		peers := cluster.PeerHealth()
+		up := 0
+		for _, p := range peers {
+			if p.Up {
+				up++
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"peers": peers, "peersUp": up, "peersTotal": len(peers),
+			"health": s.obj.Health(r.Context(), object.HealthOptions{}),
+		})
 	case path == "datausage" && r.Method == http.MethodGet:
 		u := s.scan.Usage()
 		if u == nil {

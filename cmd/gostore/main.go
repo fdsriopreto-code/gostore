@@ -168,6 +168,7 @@ func runServer(args []string) error {
 		pool.SetLocker(coord.NewNSLock)
 		clusterRPC = rpc.Handler()
 		obj = pool
+		cluster.StartPeerMonitor(context.Background(), spec.PeerBases, secret)
 		n := len(spec.Disks)
 		logger.Info("cluster erasure pool ready", "disks", n, "dataBlocks", n-n/2, "parityBlocks", n/2)
 		return serve(cfg, obj, clusterRPC)
@@ -462,6 +463,13 @@ func applyInlineMax() {
 func applyListCacheTTL() {
 	v := os.Getenv("GOSTORE_LIST_CACHE_TTL")
 	if v == "" {
+		// Clustered: another node's write won't invalidate this node's list
+		// cache, so keep the default short (bounded cross-node LIST
+		// staleness) — still long enough to serve a paginating client.
+		if os.Getenv("GOSTORE_CLUSTER_SELF") != "" {
+			erasure.SetListCacheTTL(2 * time.Second)
+			logger.Info("list cache TTL set", "ttl", "2s", "reason", "clustered default")
+		}
 		return
 	}
 	d, err := time.ParseDuration(v)

@@ -1606,6 +1606,7 @@ new PutObjectCommand({ Bucket: "b", Key: "k", Body: buf, ServerSideEncryption: "
       ["GET /gostore/admin/v1/scrub", "—", "deep-scrub progress (running, objectsScanned, objectsRepaired, unrecoverable)"],
       ["POST /gostore/admin/v1/scrub", "—", "force a full deep scrub now (verify + repair every object)"],
       ["GET/POST /gostore/admin/v1/readonly", "<code>{enabled:bool}</code>", "read-only mode — reject every write with <code>503 ServerReadOnly</code> while still serving reads. Entered automatically when write quorum is impossible (auto-clears); a manual hold does not."],
+      ["GET /gostore/admin/v1/cluster", "—", "per-peer up/down as seen from this node (circuit-breaker view, kept fresh by a 15s monitor) + backend health"],
       ["GET /gostore/admin/v1/datausage", "—", "per-bucket object counts &amp; byte totals from the last scan"],
       ["GET /gostore/admin/v1/whoami", "—", "<b>any authenticated key</b>: your identity, effective policies, admin?"],
       ["POST /gostore/admin/v1/users/rotate-secret", "<code>{accessKey, secretKey?}</code>", "give an existing user a fresh secret (old one dies immediately)"],
