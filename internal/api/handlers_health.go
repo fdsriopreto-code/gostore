@@ -58,6 +58,18 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	metrics.WritePrometheus(w, g)
 
+	{
+		ro := 0
+		if s.ro.on() {
+			ro = 1
+		}
+		fmt.Fprintf(w, "# HELP gostore_read_only Whether the server is rejecting writes (1) or not (0).\n")
+		fmt.Fprintf(w, "# TYPE gostore_read_only gauge\ngostore_read_only %d\n", ro)
+		if inF, mx := s.adm.stats(); mx > 0 {
+			fmt.Fprintf(w, "# TYPE gostore_request_bytes_inflight gauge\ngostore_request_bytes_inflight %d\n", inF)
+			fmt.Fprintf(w, "# TYPE gostore_request_bytes_inflight_max gauge\ngostore_request_bytes_inflight_max %d\n", mx)
+		}
+	}
 	if s.ocache.enabled() {
 		n, bytes, hits, miss := s.ocache.stats()
 		fmt.Fprintf(w, "# HELP gostore_objcache_entries Objects held in the hot-object RAM cache.\n")

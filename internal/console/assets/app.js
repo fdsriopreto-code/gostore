@@ -1605,6 +1605,7 @@ new PutObjectCommand({ Bucket: "b", Key: "k", Body: buf, ServerSideEncryption: "
       ["POST /gostore/admin/v1/scanner/run", "—", "run one scan pass now (lifecycle + usage + heal sample)"],
       ["GET /gostore/admin/v1/scrub", "—", "deep-scrub progress (running, objectsScanned, objectsRepaired, unrecoverable)"],
       ["POST /gostore/admin/v1/scrub", "—", "force a full deep scrub now (verify + repair every object)"],
+      ["GET/POST /gostore/admin/v1/readonly", "<code>{enabled:bool}</code>", "read-only mode — reject every write with <code>503 ServerReadOnly</code> while still serving reads. Entered automatically when write quorum is impossible (auto-clears); a manual hold does not."],
       ["GET /gostore/admin/v1/datausage", "—", "per-bucket object counts &amp; byte totals from the last scan"],
       ["GET /gostore/admin/v1/whoami", "—", "<b>any authenticated key</b>: your identity, effective policies, admin?"],
       ["POST /gostore/admin/v1/users/rotate-secret", "<code>{accessKey, secretKey?}</code>", "give an existing user a fresh secret (old one dies immediately)"],
@@ -1705,6 +1706,8 @@ GOSTORE_CLUSTER_SELF=http://node2:9000 gostore server \\
       ["GOSTORE_MULTIPART_TTL", "168h", "abort incomplete multipart uploads older than this even with no lifecycle rule; <code>0</code> disables"],
       ["GOSTORE_DISK_OP_TIMEOUT", "30s", "hard cap on each fast/metadata disk op so a hung disk can't stall a write past its namespace lock; <code>0</code> disables"],
       ["GOSTORE_ALLOW_FORMAT_MISMATCH", "0", "set <code>1</code> to start even when a disk's on-disk position (set/disk index) disagrees with the configured order — only during a deliberate topology migration"],
+      ["GOSTORE_MAX_INFLIGHT_BYTES", "536870912", "cap on total request-body bytes in flight for writes; over it new writes get <code>503 SlowDown</code>"],
+      ["GOSTORE_MEM_LIMIT_BYTES", "0", "when set, heap-in-use above this sheds new writes with 503 for ~5s (memory backpressure); <code>0</code> disables"],
     ]));
     c.append(el("h3", {}, "Built-in HTTPS (Let's Encrypt)"));
     c.append(P("Set <code>GOSTORE_TLS_DOMAIN</code> and gostore obtains and renews its own certificate — no nginx/Caddy in front. Point <code>GOSTORE_ADDRESS</code> at <code>:443</code>, publish port 80 as well (ACME HTTP-01 challenge + a redirect to https). MinIO can't do this."));

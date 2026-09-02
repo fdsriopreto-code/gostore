@@ -62,6 +62,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	case path == "scrub" && r.Method == http.MethodPost:
 		go s.scan.DeepScrub(context.Background())
 		writeJSON(w, http.StatusAccepted, map[string]any{"started": true})
+	case path == "readonly":
+		s.handleAdminReadOnly(w, r)
 	case path == "datausage" && r.Method == http.MethodGet:
 		u := s.scan.Usage()
 		if u == nil {

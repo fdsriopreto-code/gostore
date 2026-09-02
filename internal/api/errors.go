@@ -59,6 +59,8 @@ const (
 	ErrInvalidPolicyDocument
 	ErrNoSuchWebsiteConfiguration
 	ErrInvalidWriteOffset
+	ErrServerReadOnly
+	ErrBusy
 )
 
 // APIError is the resolved (code, message, http status) triple.
@@ -115,6 +117,8 @@ var errorCodeMap = map[APIErrorCode]APIError{
 	ErrInvalidPolicyDocument:         {"InvalidPolicyDocument", "The content of the form does not meet the conditions specified in the policy document.", http.StatusForbidden},
 	ErrNoSuchWebsiteConfiguration:    {"NoSuchWebsiteConfiguration", "The specified bucket does not have a website configuration.", http.StatusNotFound},
 	ErrInvalidWriteOffset:            {"InvalidWriteOffset", "The write offset must equal the current object size.", http.StatusConflict},
+	ErrServerReadOnly:                {"ServerReadOnly", "The server is in read-only mode; writes are temporarily rejected.", http.StatusServiceUnavailable},
+	ErrBusy:                          {"SlowDown", "The server is shedding load; retry shortly.", http.StatusServiceUnavailable},
 }
 
 // GetAPIError resolves a code; unknown codes fall back to InternalError.

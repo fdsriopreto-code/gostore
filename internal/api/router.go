@@ -30,6 +30,8 @@ type Server struct {
 
 	polCache *bucketPolicyCache
 	ocache   *objCache
+	ro       readOnlyState
+	adm      *admissionControl
 
 	domainNames []string
 }
@@ -49,7 +51,9 @@ func NewServer(cfg config.Config, obj object.Layer, im *iam.Manager, bc *bucketc
 		rl:       newRateLimiter(),
 		polCache: newBucketPolicyCache(),
 		ocache:   newObjCache(),
+		adm:      newAdmissionControl(),
 	}
+	go s.watchQuorum(context.Background())
 	if v := strings.TrimSpace(os.Getenv("GOSTORE_DOMAIN")); v != "" {
 		for _, d := range strings.Split(v, ",") {
 			if d = strings.TrimSpace(d); d != "" {
@@ -160,6 +164,22 @@ func (s *Server) handleS3(w http.ResponseWriter, r *http.Request) {
 	}
 
 	q := r.URL.Query()
+
+	// Write admission: read-only mode + global in-flight-bytes / memory shed.
+	if isMutatingRequest(r, q) {
+		if s.ro.on() {
+			w.Header().Set("Retry-After", "10")
+			writeErrorResponse(w, r, ErrServerReadOnly, r.URL.Path)
+			return
+		}
+		if rel, ok := s.adm.admit(admissionBytes(r)); ok {
+			defer rel()
+		} else {
+			w.Header().Set("Retry-After", "1")
+			writeErrorResponse(w, r, ErrBusy, r.URL.Path)
+			return
+		}
+	}
 
 	// Static-website serving: a plain GET (no S3 sub-resource query) against a
 	// website-enabled bucket serves index/error documents. Sub-resource calls
