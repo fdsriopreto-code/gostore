@@ -214,6 +214,13 @@ func (s *Set) putObjectSSE(ctx context.Context, bucket, key string, parts []part
 		UserTags:    um.tags,
 	}
 
+	// Inline path: a single small part is buffered into xl.meta instead of
+	// written as one shard file per disk. xl.meta is already replicated to
+	// every disk, so the data is protected the same way the metadata is.
+	if len(parts) == 1 && inlineMaxBytes > 0 && parts[0].Size >= 0 && parts[0].Size <= inlineMaxBytes {
+		return s.putObjectInline(ctx, staging, bucket, key, meta, parts[0], sp)
+	}
+
 	var total int64
 	partMD5Raw := make([]byte, 0, len(parts)*16)
 
@@ -255,7 +262,55 @@ func (s *Set) putObjectSSE(ctx context.Context, bucket, key string, parts []part
 		meta.NoncePrefix = hex.EncodeToString(sp.prefix)
 	}
 
-	// Write identical xl.meta to every disk's staging dir.
+	return s.commitMeta(ctx, staging, bucket, key, meta)
+}
+
+// putObjectInline buffers a single small part into meta.Inline and commits
+// xl.meta (which every disk holds a copy of) — no shard files.
+func (s *Set) putObjectInline(ctx context.Context, staging, bucket, key string, meta *XLMeta, ps partSource, sp *sseParams) (*XLMeta, error) {
+	reader := ps.Reader
+	if sp != nil {
+		reader = sp.wrapForEncrypt(reader)
+	}
+	buf, err := io.ReadAll(io.LimitReader(reader, inlineMaxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(buf)) > inlineMaxBytes {
+		// The declared size lied; we've consumed part of the reader, so we
+		// cannot cleanly stream now — but the part is still small enough to
+		// finish in memory up to a hard ceiling.
+		rest, rerr := io.ReadAll(reader)
+		if rerr != nil {
+			return nil, rerr
+		}
+		buf = append(buf, rest...)
+	}
+
+	partETag := fmt.Sprintf("%x", md5.Sum(buf))
+	if sp != nil {
+		sp.callFinish()
+		partETag = sp.plainMD5
+	}
+
+	meta.Size = int64(len(buf))
+	meta.ETag = partETag
+	meta.Inline = buf
+	meta.Parts = []PartMeta{{
+		Number: ps.Number, Size: int64(len(buf)), ActualSize: int64(len(buf)), ETag: partETag,
+	}}
+	if sp != nil {
+		meta.SSE = sse.Algorithm
+		meta.PlainSize = sp.plainLen
+		meta.EncDEK = sp.encDEK
+		meta.NoncePrefix = hex.EncodeToString(sp.prefix)
+	}
+	return s.commitMeta(ctx, staging, bucket, key, meta)
+}
+
+// commitMeta writes an identical xl.meta to every disk's staging dir and
+// atomically renames staging -> bucket/key on a write quorum.
+func (s *Set) commitMeta(ctx context.Context, staging, bucket, key string, meta *XLMeta) (*XLMeta, error) {
 	mb, err := meta.marshal()
 	if err != nil {
 		return nil, err
@@ -266,13 +321,10 @@ func (s *Set) putObjectSSE(ctx context.Context, bucket, key string, parts []part
 	if okCount(metaErrs) < s.writeQuorum() {
 		return nil, ErrWriteQuorum
 	}
-
-	// Commit: rename staging dir -> final object dir on every disk.
 	commitErrs := s.forEachDisk(func(d Disk) error {
 		return d.RenameDir(ctx, "", staging, bucket, key)
 	})
 	if okCount(commitErrs) < s.writeQuorum() {
-		// best-effort rollback
 		_ = s.forEachDisk(func(d Disk) error { return d.Delete(ctx, bucket, key, true) })
 		return nil, ErrWriteQuorum
 	}
@@ -432,6 +484,19 @@ func (s *Set) getObject(ctx context.Context, bucket, key string, off, length int
 	}
 	if length <= 0 {
 		return nil
+	}
+
+	// Inline objects: bytes live in xl.meta, already recovered by readMeta.
+	if meta.Inline != nil {
+		end := off + length
+		if end > int64(len(meta.Inline)) {
+			end = int64(len(meta.Inline))
+		}
+		if off >= end {
+			return nil
+		}
+		_, werr := w.Write(meta.Inline[off:end])
+		return werr
 	}
 
 	dist := meta.Erasure.Distribution

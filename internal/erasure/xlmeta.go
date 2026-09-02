@@ -35,6 +35,14 @@ type XLMeta struct {
 
 	Parts []PartMeta `json:"parts"`
 
+	// Inline holds the object's bytes directly in xl.meta for small objects
+	// (<= inlineMax). xl.meta is replicated verbatim to every disk, so inline
+	// data recovers on the same read quorum that recovers the metadata and
+	// needs one file op per disk to read or write instead of an extra
+	// shard-file-per-disk. For SSE objects Inline is the ciphertext
+	// (ETag/PlainSize semantics unchanged).
+	Inline []byte `json:"inline,omitempty"`
+
 	// SSE-S3 at rest. When SSE == "AES256": Size/part sizes are ciphertext,
 	// PlainSize is the logical object size, ETag the plaintext md5.
 	SSE         string `json:"sse,omitempty"`
@@ -91,6 +99,7 @@ func (m *XLMeta) contentHash() string {
 		P []PartMeta
 	}{m.Size, m.ModTime.UnixNano(), m.ETag, m.Parts})
 	h.Write(b)
+	h.Write(m.Inline)
 	return hex.EncodeToString(h.Sum(nil))
 }
 

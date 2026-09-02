@@ -54,6 +54,14 @@ type Disk interface {
 // blockSizeV2 is the stripe block size per shard (1 MiB), matching MinIO.
 const blockSizeV2 = 1 << 20
 
+// inlineMaxBytes is the largest object stored inline in xl.meta instead of as
+// shard files. Matches MinIO's default (128 KiB). Overridable at startup.
+var inlineMaxBytes int64 = 128 << 10
+
+// SetInlineMax sets the inline-object size threshold (bytes). <= 0 disables
+// inlining. Call once at startup before serving.
+func SetInlineMax(n int64) { inlineMaxBytes = n }
+
 // Erasure wraps a Reed-Solomon codec plus its parameters.
 type Erasure struct {
 	enc          reedsolomon.Encoder

@@ -142,6 +142,7 @@ func runServer(args []string) error {
 		if err != nil {
 			return fmt.Errorf("init KMS: %w", err)
 		}
+		applyInlineMax()
 		set, err := erasure.NewSet(spec.Disks)
 		if err != nil {
 			return fmt.Errorf("cluster erasure set: %w", err)
@@ -187,6 +188,7 @@ func runServer(args []string) error {
 	if err != nil {
 		return fmt.Errorf("init KMS: %w", err)
 	}
+	applyInlineMax()
 
 	if cfg.SingleDisk() {
 		backend, err := fsbackend.New(cfg.VolumeGroups[0][0])
@@ -310,6 +312,22 @@ func serve(cfg config.Config, obj object.Layer, clusterRPC http.Handler) error {
 	}
 	logger.Info("stopped cleanly")
 	return nil
+}
+
+// applyInlineMax honours GOSTORE_INLINE_MAX (bytes; 0 disables inlining) for
+// the erasure backend's small-object-in-xl.meta threshold.
+func applyInlineMax() {
+	v := os.Getenv("GOSTORE_INLINE_MAX")
+	if v == "" {
+		return
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n < 0 {
+		logger.Warn("ignoring invalid GOSTORE_INLINE_MAX", "value", v)
+		return
+	}
+	erasure.SetInlineMax(n)
+	logger.Info("inline object threshold set", "bytes", n)
 }
 
 func modeString(c config.Config) string {

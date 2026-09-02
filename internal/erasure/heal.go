@@ -69,6 +69,12 @@ func (s *Set) healObject(ctx context.Context, bucket, key string) (int, int, err
 		}
 	}
 
+	// Inline objects carry their data in xl.meta itself; re-replicating the
+	// metadata above is the whole heal.
+	if m.Inline != nil {
+		return metaFixed, 0, nil
+	}
+
 	dist := m.Erasure.Distribution
 	fullShard := m.Erasure.BlockSize
 	shardFixed := 0
