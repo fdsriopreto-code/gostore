@@ -1667,8 +1667,9 @@ aws --endpoint-url ${x.origin} s3api put-object-legal-hold \\
 new PutObjectCommand({ Bucket: "b", Key: "k", Body: buf, ServerSideEncryption: "AES256" })`, "bash", "shell"));
     c.append(UL(
       "The <code>ETag</code> stays the MD5 of the <i>plaintext</i>; the reported object size is the plaintext size.",
-      "Master key: <code>GOSTORE_KMS_MASTER_KEY</code> (base64 of 32 bytes) or auto-generated to <code>.gostore.sys/kms/master.key</code>.",
-      "Set default encryption per request; a bucket-level default and SSE-KMS / SSE-C are not implemented yet. On the erasure backend, single-part PUT only.",
+      "Master key (local mode): <code>GOSTORE_KMS_MASTER_KEY</code> (base64 of 32 bytes) or auto-generated to <code>.gostore.sys/kms/master.key</code>.",
+      "<b>External KMS</b>: set <code>GOSTORE_KMS_VAULT_ADDR</code> + <code>GOSTORE_KMS_VAULT_TOKEN</code> (+ <code>GOSTORE_KMS_VAULT_KEY</code>, default <code>gostore</code>) and per-object data keys are wrapped/unwrapped by HashiCorp Vault's Transit engine — the master key never enters the gostore process and Vault owns rotation. Legacy locally-wrapped objects still decrypt (auto-detected by a <code>vault:</code> prefix). <code>/gostore/admin/v1/info</code> reports <code>kms</code>.",
+      "Set default encryption per request; a bucket-level default and SSE-C are not implemented yet. On the erasure backend, single-part PUT only.",
     ));
   }},
 
@@ -1771,7 +1772,8 @@ GOSTORE_CLUSTER_SELF=http://node2:9000 gostore server \\
       ["GOSTORE_REGION", "region reported to clients (default <code>us-east-1</code>)"],
       ["GOSTORE_ADDRESS / GOSTORE_CONSOLE_ADDRESS", "listen addresses (default <code>:9000</code> / <code>:9001</code>)"],
       ["GOSTORE_DOMAIN", "comma-list of domains to enable virtual-host-style addressing"],
-      ["GOSTORE_KMS_MASTER_KEY", "base64 of 32 bytes for SSE-S3; auto-generated to <code>.gostore.sys/kms/master.key</code> if unset"],
+      ["GOSTORE_KMS_MASTER_KEY", "base64 of 32 bytes for SSE-S3 (local mode); auto-generated to <code>.gostore.sys/kms/master.key</code> if unset"],
+      ["GOSTORE_KMS_VAULT_ADDR / _TOKEN / _KEY", "when set, per-object data keys are wrapped by HashiCorp Vault's Transit engine instead of the local master key"],
       ["GOSTORE_LOG_LEVEL / GOSTORE_LOG_JSON", "<code>debug|info|warn|error</code> / <code>1</code> for JSON logs"],
       ["GOSTORE_NO_CONTENT_TYPE_SNIFF", "set to <code>1</code> to stop guessing an object's Content-Type from its key extension when the client sent none / <code>application/octet-stream</code>"],
       ["GOSTORE_METRICS_TOKEN", "when set, <code>GET /gostore/metrics</code> requires <code>Authorization: Bearer &lt;token&gt;</code> (otherwise the endpoint is open)"],

@@ -70,6 +70,17 @@ type kmsWrapper interface {
 // SetKMS enables SSE-S3 at-rest encryption using the given key manager.
 func (f *FS) SetKMS(k kmsWrapper) { f.kms = k }
 
+// KMSMode reports the key-management mode for the admin info endpoint.
+func (f *FS) KMSMode() string {
+	if f.kms == nil {
+		return "disabled"
+	}
+	if mm, ok := f.kms.(interface{ Mode() string }); ok {
+		return mm.Mode()
+	}
+	return "local"
+}
+
 type diskFormat struct {
 	Version int    `json:"version"`
 	ID      string `json:"id"`

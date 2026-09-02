@@ -188,6 +188,9 @@ func (s *Server) adminInfo(w http.ResponseWriter, r *http.Request) {
 	}
 	info["dedup"] = erasure.DedupEnabled()
 	info["readOnly"] = s.ro.on()
+	if km, ok := s.obj.(interface{ KMSMode() string }); ok {
+		info["kms"] = km.KMSMode()
+	}
 	writeJSON(w, http.StatusOK, info)
 }
 

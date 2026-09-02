@@ -18,6 +18,18 @@ type kmsWrapper interface {
 // SetKMS enables SSE-S3 at-rest encryption for single-part PutObject.
 func (p *Pool) SetKMS(k kmsWrapper) { p.kms = k }
 
+// KMSMode reports the key-management mode ("local", "vault-transit", or
+// "disabled"), for the admin info endpoint.
+func (p *Pool) KMSMode() string {
+	if p.kms == nil {
+		return "disabled"
+	}
+	if mm, ok := p.kms.(interface{ Mode() string }); ok {
+		return mm.Mode()
+	}
+	return "local"
+}
+
 // sseParams carries the material for encrypting one object.
 type sseParams struct {
 	dek    []byte
