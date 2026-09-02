@@ -738,3 +738,36 @@ func TestStreamingChunkedUpload(t *testing.T) {
 		t.Fatalf("chunked round-trip mismatch: len %d vs %d", len(got), len(raw))
 	}
 }
+
+func TestContentTypeSniffFromExtension(t *testing.T) {
+	srv := newTestServer(t)
+	if resp := do(t, srv, http.MethodPut, "/media", []byte{}, nil); resp.StatusCode != 200 {
+		t.Fatalf("CreateBucket: %d", resp.StatusCode)
+	}
+
+	cases := []struct {
+		key, sentCT, wantCT string
+	}{
+		{"/media/clip.mp4", "", "video/mp4"},
+		{"/media/clip2.mp4", "application/octet-stream", "video/mp4"},
+		{"/media/pic.webp", "application/octet-stream", "image/webp"},
+		{"/media/doc.pdf", "", "application/pdf"},
+		{"/media/raw.bin", "application/octet-stream", "application/octet-stream"}, // unknown ext: left as-is
+		{"/media/explicit.mp4", "text/plain", "text/plain"},                        // explicit non-generic type wins
+	}
+	for _, c := range cases {
+		hdr := map[string]string{}
+		if c.sentCT != "" {
+			hdr["Content-Type"] = c.sentCT
+		}
+		if resp := do(t, srv, http.MethodPut, c.key, []byte("x"), hdr); resp.StatusCode != 200 {
+			t.Fatalf("PUT %s: %d %s", c.key, resp.StatusCode, readBody(t, resp))
+		}
+		resp := do(t, srv, http.MethodHead, c.key, nil, nil)
+		got := resp.Header.Get("Content-Type")
+		resp.Body.Close()
+		if got != c.wantCT {
+			t.Fatalf("%s (sent %q): Content-Type = %q, want %q", c.key, c.sentCT, got, c.wantCT)
+		}
+	}
+}

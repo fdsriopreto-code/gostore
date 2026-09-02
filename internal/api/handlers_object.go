@@ -3,8 +3,11 @@ package api
 import (
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
+	"os"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -28,7 +31,7 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, bucket,
 	}
 
 	opts := s.vopts(bucket, r)
-	opts.UserDefined = extractMetadata(r)
+	opts.UserDefined = extractMetadata(r, key)
 	if v := r.Header.Get("x-amz-tagging"); v != "" {
 		opts.UserTags = v
 	}
@@ -175,7 +178,7 @@ func (s *Server) handleCopyObject(w http.ResponseWriter, r *http.Request, bucket
 		return
 	}
 
-	dstOpts := object.ObjectOptions{UserDefined: extractMetadata(r)}
+	dstOpts := object.ObjectOptions{UserDefined: extractMetadata(r, key)}
 	if strings.EqualFold(r.Header.Get("x-amz-metadata-directive"), "REPLACE") {
 		dstOpts.UserDefined["_directive"] = "REPLACE"
 	}
@@ -297,13 +300,53 @@ func bodySize(r *http.Request) int64 {
 	return r.ContentLength
 }
 
+// noSniff disables guessing an object's Content-Type from its key extension
+// (GOSTORE_NO_CONTENT_TYPE_SNIFF=1).
+var noSniff = os.Getenv("GOSTORE_NO_CONTENT_TYPE_SNIFF") == "1"
+
+// extraMimeTypes covers a few media types the stdlib mime table can miss on
+// a minimal container image.
+var extraMimeTypes = map[string]string{
+	".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktime",
+	".webm": "video/webm", ".mkv": "video/x-matroska", ".avi": "video/x-msvideo",
+	".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".aac": "audio/aac",
+	".flac": "audio/flac", ".wav": "audio/wav", ".ogg": "audio/ogg", ".oga": "audio/ogg",
+	".webp": "image/webp", ".avif": "image/avif", ".svg": "image/svg+xml",
+	".pdf": "application/pdf", ".json": "application/json", ".wasm": "application/wasm",
+	".txt": "text/plain; charset=utf-8", ".csv": "text/csv; charset=utf-8",
+	".md": "text/markdown; charset=utf-8",
+}
+
+// sniffContentType guesses a MIME type from the object key's extension.
+func sniffContentType(key string) string {
+	ext := strings.ToLower(path.Ext(key))
+	if ext == "" {
+		return ""
+	}
+	if v, ok := extraMimeTypes[ext]; ok {
+		return v
+	}
+	return mime.TypeByExtension(ext)
+}
+
 // extractMetadata pulls content-type, content-encoding and x-amz-meta-* into
 // the UserDefined map (keys lower-cased, x-amz-meta- prefix kept as-is on
 // meta keys, plain "content-type"/"content-encoding" for those two).
-func extractMetadata(r *http.Request) map[string]string {
+//
+// When the client sends no Content-Type, or the generic
+// "application/octet-stream" (what curl and most SDKs default to), and the
+// object key has a well-known extension, the type is filled in from that
+// extension so the object plays / renders correctly when served later.
+func extractMetadata(r *http.Request, key string) map[string]string {
 	md := map[string]string{}
-	if v := r.Header.Get("Content-Type"); v != "" {
-		md["content-type"] = v
+	ct := strings.TrimSpace(r.Header.Get("Content-Type"))
+	if (ct == "" || ct == "application/octet-stream") && !noSniff {
+		if guess := sniffContentType(key); guess != "" {
+			ct = guess
+		}
+	}
+	if ct != "" {
+		md["content-type"] = ct
 	}
 	if v := r.Header.Get("Content-Encoding"); v != "" {
 		md["content-encoding"] = v

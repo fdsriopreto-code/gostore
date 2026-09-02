@@ -216,6 +216,11 @@ requests sem assinatura — só debug), `GOSTORE_KMS_MASTER_KEY` (base64 de 32
 bytes; senão é gerada em `.gostore.sys/kms/master.key`), `GOSTORE_SCAN_INTERVAL`
 (ex. `30m`; default `1h`), `GOSTORE_DISABLE_SELFTEST=1`.
 
+`GOSTORE_NO_CONTENT_TYPE_SNIFF=1` desliga o palpite de Content-Type pela
+extensão da key quando o cliente não manda nenhum (ou manda
+`application/octet-stream`) — por padrão o gostore preenche (`.mp4` →
+`video/mp4` etc.) pra mídia servir/tocar certo depois.
+
 Tuning do backend erasure (opcionais):
 `GOSTORE_INLINE_MAX` (bytes; objetos até esse tamanho ficam dentro do
 `xl.meta`; default `131072`, `0` desliga), `GOSTORE_MRF_INTERVAL` (cadência do

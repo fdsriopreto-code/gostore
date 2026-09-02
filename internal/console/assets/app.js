@@ -665,6 +665,43 @@ async function bucketSettings(v, b) {
     sec(label, ta, bar);
   };
 
+  // --- Public access (one-click anonymous read) ---
+  {
+    let pol = null;
+    try {
+      const r = await api("GET", "/" + b, { query: { policy: "" } });
+      if (r.ok) { const txt = await r.text(); if (txt.trim().startsWith("{")) pol = JSON.parse(txt); }
+    } catch {}
+    const arr = (x) => (Array.isArray(x) ? x : x == null ? [] : [x]);
+    const isPublic = !!pol && arr(pol.Statement).some((st) =>
+      st.Effect === "Allow" &&
+      (st.Principal === "*" || st.Principal?.AWS === "*" || arr(st.Principal?.AWS).includes("*")) &&
+      arr(st.Action).includes("s3:GetObject") &&
+      arr(st.Resource).some((rr) => rr === `arn:aws:s3:::${b}/*` || rr === "arn:aws:s3:::*"));
+    const pill = el("span", { class: "pill" + (isPublic ? " ok" : "") }, isPublic ? "Public — anonymous read" : "Private");
+    const btn = el("button", { class: (isPublic ? "danger" : "primary") + " sm" }, isPublic ? "Make private" : "Make public");
+    btn.onclick = async () => {
+      try {
+        if (isPublic) {
+          await must(await api("DELETE", "/" + b, { query: { policy: "" } }));
+          toast("Bucket is now private", "ok");
+        } else {
+          const body = JSON.stringify({ Version: "2012-10-17", Statement: [
+            { Effect: "Allow", Principal: "*", Action: ["s3:GetObject"], Resource: [`arn:aws:s3:::${b}/*`] }] });
+          await must(await api("PUT", "/" + b, { query: { policy: "" }, contentType: "application/json", body }));
+          toast("Bucket is publicly readable now", "ok");
+        }
+        render();
+      } catch (e) { toast(e.message, "err"); }
+    };
+    sec("Public access",
+      el("div", { class: "row", style: "align-items:center;gap:12px" }, pill, btn),
+      el("p", { class: "muted small" },
+        "When public, anyone can GET objects at ", el("code", {}, location.origin + "/" + b + "/<key>"),
+        " with no credentials — good for serving images/video on a site. Upload, list and delete still need a key. "
+        + "For cross-origin playback in a browser you also need CORS (below)."));
+  }
+
   // versioning
   let vstat = "";
   try { vstat = t(parseXml(await (await api("GET", "/" + b, { query: { versioning: "" } })).text()), "Status"); } catch {}
@@ -683,7 +720,14 @@ async function bucketSettings(v, b) {
   await editor("Replication", "replication", "application/json",
     JSON.stringify([{ id: "r1", prefix: "", destBucket: "backup", destEndpoint: "", deleteReplication: true }], null, 2));
   await editor("CORS", "cors", "application/xml",
-    `<CORSConfiguration><CORSRule><AllowedOrigin>*</AllowedOrigin><AllowedMethod>GET</AllowedMethod><AllowedHeader>*</AllowedHeader></CORSRule></CORSConfiguration>`);
+    `<CORSConfiguration><CORSRule><AllowedOrigin>*</AllowedOrigin><AllowedMethod>GET</AllowedMethod><AllowedMethod>HEAD</AllowedMethod><AllowedHeader>*</AllowedHeader></CORSRule></CORSConfiguration>`);
+  v.append(el("div", { class: "toolbar" }, el("button", { class: "ghost sm", onclick: async () => {
+    try {
+      await must(await api("PUT", "/" + b, { query: { cors: "" }, contentType: "application/xml",
+        body: "<CORSConfiguration><CORSRule><AllowedOrigin>*</AllowedOrigin><AllowedMethod>GET</AllowedMethod><AllowedMethod>HEAD</AllowedMethod><AllowedHeader>*</AllowedHeader></CORSRule></CORSConfiguration>" }));
+      toast("CORS set: any origin can GET/HEAD (browser playback works)", "ok"); render();
+    } catch (e) { toast(e.message, "err"); }
+  } }, ic(ICON.plus), "Quick: allow browser playback from any origin")));
   await editor("Event notifications", "notification", "application/json",
     JSON.stringify({ webhooks: [{ id: "w1", url: "https://example.com/hook", events: ["s3:ObjectCreated:*"], prefix: "", suffix: "" }] }, null, 2));
 }
@@ -873,8 +917,9 @@ aws --endpoint-url ${x.origin} s3 ls s3://my-bucket
 aws --endpoint-url ${x.origin} s3 cp s3://my-bucket/hello.txt -`, "bash", "shell"));
     c.append(el("h3", {}, "3. Next steps"));
     c.append(UL(
-      "<a onclick=\"location.hash='#/docs/connect'\">Connect an SDK</a> — code for JS, Python, Go, Go, CLI, mc",
-      "<a onclick=\"location.hash='#/docs/presigned'\">Presigned URLs</a> — share objects without credentials",
+      "<a onclick=\"location.hash='#/docs/connect'\">Connect an SDK</a> — code for JS, Python, Go, CLI, mc",
+      "<b>Serve media directly:</b> open a bucket → Settings → <b>Public access → Make public</b>, then anyone can load <code>" + x.origin + "/&lt;bucket&gt;/&lt;key&gt;</code> in a <code>&lt;video&gt;</code>/<code>&lt;img&gt;</code> tag. Add the one-click CORS rule for cross-origin playback.",
+      "<a onclick=\"location.hash='#/docs/presigned'\">Presigned URLs</a> — share private objects without credentials",
       "<a onclick=\"location.hash='#/docs/iam'\">IAM & policies</a> — users, service accounts, scoped access",
       "<a onclick=\"location.hash='#/docs/versioning'\">Versioning</a>, <a onclick=\"location.hash='#/docs/object-lock'\">Object Lock</a>, <a onclick=\"location.hash='#/docs/lifecycle'\">Lifecycle</a>, <a onclick=\"location.hash='#/docs/replication'\">Replication</a>",
     ));
@@ -1260,6 +1305,7 @@ GOSTORE_CLUSTER_SELF=http://node2:9000 gostore server \\
       ["GOSTORE_DOMAIN", "comma-list of domains to enable virtual-host-style addressing"],
       ["GOSTORE_KMS_MASTER_KEY", "base64 of 32 bytes for SSE-S3; auto-generated to <code>.gostore.sys/kms/master.key</code> if unset"],
       ["GOSTORE_LOG_LEVEL / GOSTORE_LOG_JSON", "<code>debug|info|warn|error</code> / <code>1</code> for JSON logs"],
+      ["GOSTORE_NO_CONTENT_TYPE_SNIFF", "set to <code>1</code> to stop guessing an object's Content-Type from its key extension when the client sent none / <code>application/octet-stream</code>"],
     ]));
     c.append(el("h3", {}, "Background work & erasure tuning"));
     c.append(TBL(["Variable", "Default", "Purpose"], [

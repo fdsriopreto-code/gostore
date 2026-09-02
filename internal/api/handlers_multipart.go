@@ -11,7 +11,7 @@ import (
 )
 
 func (s *Server) handleNewMultipartUpload(w http.ResponseWriter, r *http.Request, bucket, key string) {
-	opts := object.ObjectOptions{UserDefined: extractMetadata(r)}
+	opts := object.ObjectOptions{UserDefined: extractMetadata(r, key)}
 	if v := r.Header.Get("x-amz-tagging"); v != "" {
 		opts.UserTags = v
 	}
