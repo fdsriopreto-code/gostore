@@ -646,9 +646,16 @@ async function objectDrawer(b, o) {
       const btn = el("button", { class: on ? "on" : "", onclick: () => { tabs.querySelectorAll("button").forEach((x) => x.classList.remove("on")); btn.classList.add("on"); body.innerHTML = ""; fn(body); } }, label);
       tabs.append(btn); if (on) fn(body); return btn;
     };
+    const s3uri = "s3://" + b + "/" + o.key;
+    const ext0 = (o.key.split(".").pop() || "").toLowerCase();
+    const EDITABLE = ["txt", "json", "csv", "log", "md", "xml", "yaml", "yml", "html", "js", "css", "svg", "ini", "conf", "sh", "env"];
     tab("d", "Details", (c) => {
       c.append(el("div", { class: "kv" },
         el("div", { class: "k" }, "Key"), el("div", { class: "v" }, o.key),
+        el("div", { class: "k" }, "S3 URI"), el("div", { class: "v" }, el("code", {}, s3uri),
+          el("button", { class: "ghost iconbtn", title: "Copy", onclick: () => copyText(s3uri) }, ic(ICON.copy))),
+        el("div", { class: "k" }, "URL"), el("div", { class: "v" }, el("code", {}, location.origin + "/" + b + "/" + o.key),
+          el("button", { class: "ghost iconbtn", title: "Copy", onclick: () => copyText(location.origin + "/" + b + "/" + o.key) }, ic(ICON.copy))),
         el("div", { class: "k" }, "Size"), el("div", { class: "v" }, fmtSize(o.size) + ` (${o.size} B)`),
         el("div", { class: "k" }, "Modified"), el("div", { class: "v" }, fmtDate(o.lm)),
         el("div", { class: "k" }, "ETag"), el("div", { class: "v" }, el("code", {}, o.etag))));
@@ -659,6 +666,25 @@ async function objectDrawer(b, o) {
           try { await must(await api("DELETE", "/" + b + "/" + o.key)); toast("Deleted", "ok"); closeDrawer(); render(); } catch (e) { toast(e.message, "err"); }
         } }, ic(ICON.trash), "Delete")));
     }, true);
+    if (EDITABLE.includes(ext0) && o.size <= 1048576) tab("e", "Edit", async (c) => {
+      c.append(el("div", { class: "empty" }, el("span", { class: "spin" })));
+      let text;
+      try { text = await (await api("GET", "/" + b + "/" + o.key)).text(); }
+      catch (e) { c.innerHTML = ""; c.append(el("div", { class: "muted small" }, e.message)); return; }
+      c.innerHTML = "";
+      const ta = el("textarea", { style: "min-height:340px;width:100%;font:12px/1.6 var(--mono)", spellcheck: "false" }, text);
+      const save = el("button", { class: "primary" }, ic(ICON.up), "Save");
+      save.onclick = async () => {
+        save.disabled = true;
+        try {
+          const ctMap = { json: "application/json", html: "text/html", css: "text/css", js: "text/javascript", svg: "image/svg+xml", xml: "application/xml", csv: "text/csv", md: "text/markdown" };
+          await must(await api("PUT", "/" + b + "/" + o.key, { contentType: (ctMap[ext0] || "text/plain") + "; charset=utf-8", body: ta.value }));
+          toast("Saved", "ok"); closeDrawer(); render();
+        } catch (e) { toast(e.message, "err"); save.disabled = false; }
+      };
+      c.append(ta, el("div", { class: "toolbar" }, save,
+        el("button", { class: "ghost", onclick: () => (ta.value = text) }, "Revert")));
+    });
     tab("p", "Preview", async (c) => {
       c.append(el("div", { class: "empty" }, el("span", { class: "spin" })));
       let url;
@@ -1054,7 +1080,7 @@ const DOCS = [
     ]));
     c.append(callout("HTTPS", "For production either put a TLS terminator (Caddy, nginx, your PaaS) in front, or let gostore do it: set <code>GOSTORE_TLS_DOMAIN=your.host</code> and <code>GOSTORE_ADDRESS=:443</code> and it fetches + renews a Let's Encrypt cert itself (see the Server configuration doc). SDKs refuse to send credentials over plain HTTP.", "warn"));
     c.append(el("h3", {}, "2. Create a bucket and upload"));
-    c.append(P("From this console: Buckets → Create bucket, then open it and drag files (or a whole folder) in — files over 16&nbsp;MiB upload as a multipart transfer (parts in parallel, each retried on failure); a dropped folder keeps its structure as key prefixes. Open any object → <b>Preview</b> to play video/audio (streamed via range requests) or view images, PDFs and text inline. From the CLI:"));
+    c.append(P("From this console: Buckets → Create bucket, then open it and drag files (or a whole folder) in — files over 16&nbsp;MiB upload as a multipart transfer (parts in parallel, each retried on failure); a dropped folder keeps its structure as key prefixes. Open any object → <b>Preview</b> to play video/audio (streamed via range requests) or view images, PDFs and text inline, or <b>Edit</b> a small text/JSON/config object in place and save it back. From the CLI:"));
     c.append(codeBlock(
 `aws --endpoint-url ${x.origin} --region ${x.region} \\
   s3 mb s3://my-bucket
