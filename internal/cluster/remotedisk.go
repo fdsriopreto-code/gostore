@@ -32,13 +32,30 @@ type RemoteDisk struct {
 	secret string
 	hc     *http.Client
 	grid   *gridConn
+	br     *breaker
 }
 
 // gridConns shares one multiplexed connection per (base, secret).
 var (
 	gridMu    sync.Mutex
 	gridConns = map[string]*gridConn{}
+
+	breakerMu  sync.Mutex
+	breakerFor = map[string]*breaker{}
 )
+
+// getBreaker returns the circuit breaker shared by every disk on one peer
+// node — a dead node takes all its disks down together.
+func getBreaker(base string) *breaker {
+	breakerMu.Lock()
+	defer breakerMu.Unlock()
+	b := breakerFor[base]
+	if b == nil {
+		b = &breaker{}
+		breakerFor[base] = b
+	}
+	return b
+}
 
 func getGridConn(base, secret string) *gridConn {
 	gridMu.Lock()
@@ -61,6 +78,7 @@ func NewRemoteDisk(base string, idx int, secret string) *RemoteDisk {
 		secret: secret,
 		hc:     &http.Client{Timeout: 90 * time.Second},
 		grid:   getGridConn(base, secret),
+		br:     getBreaker(base),
 	}
 }
 
@@ -69,9 +87,13 @@ func (r *RemoteDisk) ID() string     { return r.base + "#" + strconv.Itoa(r.idx)
 func (r *RemoteDisk) Index() int     { return r.idx }
 
 func (r *RemoteDisk) IsOnline() bool {
+	if !r.br.allow() {
+		return false // breaker open — treat as offline until the cooldown probe
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if _, err := r.grid.call(ctx, "ping", r.q(nil), nil); err == nil {
+		r.br.ok()
 		return true
 	} else if err != errGridUnavailable && ctx.Err() == nil {
 		// grid answered with a real error only if the peer is reachable
@@ -79,10 +101,15 @@ func (r *RemoteDisk) IsOnline() bool {
 	req, _ := r.newReq(ctx, "ping", nil, nil)
 	resp, err := r.hc.Do(req)
 	if err != nil {
+		r.br.fail(err)
 		return false
 	}
 	_ = resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
+	if resp.StatusCode == http.StatusOK {
+		r.br.ok()
+		return true
+	}
+	return false
 }
 
 // q returns the base query (disk index) plus extras.
@@ -99,11 +126,16 @@ func (r *RemoteDisk) q(extra url.Values) url.Values {
 // unary runs one small op: multiplexed grid first, HTTP on fallback. Returns
 // the raw response body.
 func (r *RemoteDisk) unary(ctx context.Context, op string, extra url.Values, body []byte) ([]byte, error) {
+	if !r.br.allow() {
+		return nil, r.br.reason()
+	}
 	out, err := r.grid.call(ctx, op, r.q(extra), body)
 	if err == nil {
+		r.br.ok()
 		return out, nil
 	}
 	if err != errGridUnavailable {
+		r.br.ok() // peer answered with an application error — connectivity is fine
 		return nil, err
 	}
 	// HTTP fallback
@@ -117,9 +149,11 @@ func (r *RemoteDisk) unary(ctx context.Context, op string, extra url.Values, bod
 	}
 	resp, rerr := r.hc.Do(req)
 	if rerr != nil {
+		r.br.fail(rerr)
 		return nil, rerr
 	}
 	defer resp.Body.Close()
+	r.br.ok()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return nil, decodeErr(resp.StatusCode, string(b))
@@ -194,11 +228,16 @@ func (r *RemoteDisk) CreateFile(ctx context.Context, bucket, object string, size
 		return err
 	}
 	req.ContentLength = size
+	if !r.br.allow() {
+		return r.br.reason()
+	}
 	resp, err := r.hc.Do(req)
 	if err != nil {
+		r.br.fail(err)
 		return err
 	}
 	defer resp.Body.Close()
+	r.br.ok()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return decodeErr(resp.StatusCode, string(b))
@@ -215,10 +254,15 @@ func (r *RemoteDisk) ReadFileStream(ctx context.Context, bucket, object string, 
 	if err != nil {
 		return nil, err
 	}
+	if !r.br.allow() {
+		return nil, r.br.reason()
+	}
 	resp, err := r.hc.Do(req)
 	if err != nil {
+		r.br.fail(err)
 		return nil, err
 	}
+	r.br.ok()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		_ = resp.Body.Close()
