@@ -1603,6 +1603,8 @@ new PutObjectCommand({ Bucket: "b", Key: "k", Body: buf, ServerSideEncryption: "
       ["DELETE /gostore/admin/v1/service-accounts?accessKey=", "—", "delete"],
       ["POST /gostore/admin/v1/heal", "—", "reconstruct missing/corrupt shards (erasure)"],
       ["POST /gostore/admin/v1/scanner/run", "—", "run one scan pass now (lifecycle + usage + heal sample)"],
+      ["GET /gostore/admin/v1/scrub", "—", "deep-scrub progress (running, objectsScanned, objectsRepaired, unrecoverable)"],
+      ["POST /gostore/admin/v1/scrub", "—", "force a full deep scrub now (verify + repair every object)"],
       ["GET /gostore/admin/v1/datausage", "—", "per-bucket object counts &amp; byte totals from the last scan"],
       ["GET /gostore/admin/v1/whoami", "—", "<b>any authenticated key</b>: your identity, effective policies, admin?"],
       ["POST /gostore/admin/v1/users/rotate-secret", "<code>{accessKey, secretKey?}</code>", "give an existing user a fresh secret (old one dies immediately)"],
@@ -1697,6 +1699,12 @@ GOSTORE_CLUSTER_SELF=http://node2:9000 gostore server \\
       ["GOSTORE_OBJ_CACHE_MAX_OBJ", "1048576", "largest object eligible for the RAM cache"],
       ["GOSTORE_OBJ_CACHE_TTL", "10s", "how long a cached object may be served before re-fetch (bounds staleness after a write on another cluster node)"],
       ["GOSTORE_APPEND_MAX", "67108864", "largest size an append target (<code>x-amz-write-offset-bytes</code>) may reach — append is read-modify-write"],
+      ["GOSTORE_SCRUB_INTERVAL", "168h", "cadence of the guaranteed full deep scrub (verify + repair every object's shards); <code>0</code> disables. Status at <code>GET /gostore/admin/v1/scrub</code>."],
+      ["GOSTORE_HEAL_CONCURRENCY", "2", "max objects repaired at once across all heal paths (read-repair, MRF, scanner sample, deep scrub); <code>0</code> = unlimited"],
+      ["GOSTORE_HEAL_SLEEP", "0", "cooldown after each repaired object so background heal never starves client I/O"],
+      ["GOSTORE_MULTIPART_TTL", "168h", "abort incomplete multipart uploads older than this even with no lifecycle rule; <code>0</code> disables"],
+      ["GOSTORE_DISK_OP_TIMEOUT", "30s", "hard cap on each fast/metadata disk op so a hung disk can't stall a write past its namespace lock; <code>0</code> disables"],
+      ["GOSTORE_ALLOW_FORMAT_MISMATCH", "0", "set <code>1</code> to start even when a disk's on-disk position (set/disk index) disagrees with the configured order — only during a deliberate topology migration"],
     ]));
     c.append(el("h3", {}, "Built-in HTTPS (Let's Encrypt)"));
     c.append(P("Set <code>GOSTORE_TLS_DOMAIN</code> and gostore obtains and renews its own certificate — no nginx/Caddy in front. Point <code>GOSTORE_ADDRESS</code> at <code>:443</code>, publish port 80 as well (ACME HTTP-01 challenge + a redirect to https). MinIO can't do this."));

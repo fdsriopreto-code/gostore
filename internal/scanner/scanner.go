@@ -58,7 +58,14 @@ type Scanner struct {
 	scrubInterval time.Duration
 	scrub         atomic.Pointer[ScrubStatus]
 	scrubRunning  atomic.Bool
+
+	// mpuTTL aborts incomplete multipart uploads older than this even when no
+	// lifecycle rule covers them (AWS applies a default too). 0 disables.
+	mpuTTL time.Duration
 }
+
+// SetMultipartTTL sets the default abort age for abandoned multipart uploads.
+func (s *Scanner) SetMultipartTTL(d time.Duration) { s.mpuTTL = d }
 
 // ScrubStatus is the progress of the current or most recent deep scrub.
 type ScrubStatus struct {
@@ -261,12 +268,15 @@ func (s *Scanner) ScanOnce(ctx context.Context) Report {
 		usage.TotalObjects += bu.Objects
 		usage.TotalBytes += bu.Bytes
 
+		// Abandoned multipart uploads: aborted per matching lifecycle rule, or
+		// after mpuTTL when nothing covers them.
+		s.abortStaleUploads(ctx, b.Name, rules, now, &rep)
+
 		if len(rules) == 0 {
 			continue
 		}
 		rep.BucketsScanned++
 		s.expireNoncurrent(ctx, b.Name, rules, now, &rep)
-		s.abortStaleUploads(ctx, b.Name, rules, now, &rep)
 	}
 	s.usage.Store(usage)
 	return rep
@@ -378,13 +388,13 @@ func (s *Scanner) expireNoncurrent(ctx context.Context, bucket string, rules []e
 // abortStaleUploads aborts multipart uploads older than the smallest
 // matching rule's threshold — one multipart listing for the whole bucket.
 func (s *Scanner) abortStaleUploads(ctx context.Context, bucket string, rules []expRule, now time.Time, rep *Report) {
-	want := false
+	haveRule := false
 	for _, r := range rules {
 		if r.abortMPU > 0 {
-			want = true
+			haveRule = true
 		}
 	}
-	if !want {
+	if !haveRule && s.mpuTTL <= 0 {
 		return
 	}
 	mu, err := s.obj.ListMultipartUploads(ctx, bucket, "", "", "", "", 1000)
@@ -393,13 +403,20 @@ func (s *Scanner) abortStaleUploads(ctx context.Context, bucket string, rules []
 		return
 	}
 	for _, u := range mu.Uploads {
-		days := 0
+		// Smallest applicable threshold: a matching rule, else the default TTL.
+		var threshold time.Duration
 		for _, r := range rules {
-			if r.abortMPU > 0 && strings.HasPrefix(u.Object, r.prefix) && (days == 0 || r.abortMPU < days) {
-				days = r.abortMPU
+			if r.abortMPU > 0 && strings.HasPrefix(u.Object, r.prefix) {
+				d := time.Duration(r.abortMPU) * 24 * time.Hour
+				if threshold == 0 || d < threshold {
+					threshold = d
+				}
 			}
 		}
-		if days == 0 || u.Initiated.After(now.Add(-time.Duration(days)*24*time.Hour)) {
+		if s.mpuTTL > 0 && (threshold == 0 || s.mpuTTL < threshold) {
+			threshold = s.mpuTTL
+		}
+		if threshold == 0 || u.Initiated.After(now.Add(-threshold)) {
 			continue
 		}
 		if err := s.obj.AbortMultipartUpload(ctx, bucket, u.Object, u.UploadID, object.ObjectOptions{}); err != nil {

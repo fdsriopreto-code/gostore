@@ -317,6 +317,13 @@ func serve(cfg config.Config, obj object.Layer, clusterRPC http.Handler) error {
 		}
 	}
 	scan.SetScrubInterval(scrubInterval)
+	mpuTTL := 7 * 24 * time.Hour // abort abandoned multipart uploads after a week
+	if v := os.Getenv("GOSTORE_MULTIPART_TTL"); v != "" {
+		if d, perr := time.ParseDuration(v); perr == nil {
+			mpuTTL = d // 0 disables
+		}
+	}
+	scan.SetMultipartTTL(mpuTTL)
 	go scan.Run(scanCtx)
 	logger.Info("background scanner started", "interval", scanInterval, "deepScrubInterval", scrubInterval)
 

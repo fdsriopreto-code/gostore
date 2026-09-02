@@ -335,14 +335,19 @@ func (s *Set) commitMeta(ctx context.Context, staging, bucket, key string, meta 
 	if err != nil {
 		return nil, err
 	}
+	// The commit must not outlive the namespace lock — bound each metadata op
+	// so one hung disk can't leave the write half-done past the lock's TTL
+	// (which would let a second writer in).
+	dctx, dcancel := withDiskDeadline(ctx)
+	defer dcancel()
 	metaErrs := s.forEachDisk(func(d Disk) error {
-		return d.WriteAll(ctx, "", path.Join(staging, metaFile), mb)
+		return d.WriteAll(dctx, "", path.Join(staging, metaFile), mb)
 	})
 	if okCount(metaErrs) < s.writeQuorum() {
 		return nil, ErrWriteQuorum
 	}
 	commitErrs := s.forEachDisk(func(d Disk) error {
-		return d.RenameDir(ctx, "", staging, bucket, key)
+		return d.RenameDir(dctx, "", staging, bucket, key)
 	})
 	committed := okCount(commitErrs)
 	if committed < s.writeQuorum() {
@@ -458,6 +463,9 @@ func (s *Set) encodePart(ctx context.Context, staging string, partNum int, dist 
 func (s *Set) readMeta(ctx context.Context, bucket, key string) (*XLMeta, error) {
 	n := s.n()
 	q := s.readQuorum()
+
+	ctx, cancel := withDiskDeadline(ctx)
+	defer cancel()
 
 	metas := make([]*XLMeta, n)
 	read := func(idxs []int) {
@@ -819,6 +827,8 @@ func (s *Set) statObject(ctx context.Context, bucket, key string) (*XLMeta, erro
 }
 
 func (s *Set) deleteObject(ctx context.Context, bucket, key string) error {
+	ctx, cancel := withDiskDeadline(ctx)
+	defer cancel()
 	errs := s.forEachDisk(func(d Disk) error { return d.Delete(ctx, bucket, key, true) })
 	if okCount(errs) < s.writeQuorum() {
 		return ErrWriteQuorum

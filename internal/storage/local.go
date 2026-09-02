@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -63,6 +64,15 @@ func OpenLocalDisk(root string, setIdx, diskIdx int) (*LocalDisk, error) {
 		var f Format
 		if err := json.Unmarshal(b, &f); err != nil {
 			return nil, err
+		}
+		// Guard against a swapped/moved disk: the on-disk position must match
+		// the position this path is configured for, or every future write
+		// lands shards on the wrong physical disk.
+		if (f.Set != setIdx || f.Disk != diskIdx) && os.Getenv("GOSTORE_ALLOW_FORMAT_MISMATCH") != "1" {
+			return nil, fmt.Errorf(
+				"storage: disk %s is formatted as set %d/disk %d but is configured as set %d/disk %d "+
+					"— a disk path was swapped or moved; fix the volume order or set GOSTORE_ALLOW_FORMAT_MISMATCH=1 to override",
+				abs, f.Set, f.Disk, setIdx, diskIdx)
 		}
 		d.id = f.ID
 	} else if errors.Is(err, os.ErrNotExist) {

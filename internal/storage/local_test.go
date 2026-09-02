@@ -57,6 +57,26 @@ func TestWriteAllAndRenameDirDurablePath(t *testing.T) {
 	}
 }
 
+func TestOpenLocalDiskRejectsSwappedFormat(t *testing.T) {
+	root := t.TempDir()
+	if _, err := OpenLocalDisk(root, 0, 2); err != nil { // first format: set 0, disk 2
+		t.Fatal(err)
+	}
+	// Re-open the same path claiming a different position -> refused.
+	if _, err := OpenLocalDisk(root, 1, 2); err == nil {
+		t.Fatal("expected a format-mismatch error when the disk position changed")
+	}
+	// Same position -> fine.
+	if _, err := OpenLocalDisk(root, 0, 2); err != nil {
+		t.Fatalf("re-open at the same position should succeed: %v", err)
+	}
+	// Override escape hatch.
+	t.Setenv("GOSTORE_ALLOW_FORMAT_MISMATCH", "1")
+	if _, err := OpenLocalDisk(root, 3, 3); err != nil {
+		t.Fatalf("override should allow a mismatch: %v", err)
+	}
+}
+
 func TestSetDirSyncToggle(t *testing.T) {
 	SetDirSync(false)
 	if dirSyncEnabled() {
