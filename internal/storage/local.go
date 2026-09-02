@@ -228,17 +228,29 @@ func (l *limitedFile) Read(p []byte) (int, error) {
 }
 func (l *limitedFile) Close() error { return l.f.Close() }
 
-// RenameDir atomically moves a whole object directory (xl.meta + shards)
-// from a staging path to its final location — the commit step of a PUT.
+// RenameDir moves a whole object directory (xl.meta + shards) from a staging
+// path to its final location — the commit step of a PUT. The os.Rename is
+// atomic; the preceding RemoveAll of any existing version leaves a sub-
+// millisecond window where a hard crash could drop that version on this one
+// disk (the write-quorum fan-out across disks is what makes the object as a
+// whole survive it). Both the staging dir's entries and the destination's new
+// directory entry are fsynced so the commit survives a power loss.
 func (d *LocalDisk) RenameDir(_ context.Context, srcBucket, srcObject, dstBucket, dstObject string) error {
 	src := d.path(srcBucket, srcObject)
 	dst := d.path(dstBucket, dstObject)
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
+	// Flush the staging dir's own entries (the shard files created inside it)
+	// before we move it into place.
+	_ = syncDir(src)
 	// Replace any existing version.
 	_ = os.RemoveAll(dst)
-	return os.Rename(src, dst)
+	if err := os.Rename(src, dst); err != nil {
+		return err
+	}
+	// Make the directory entry for the new object durable.
+	return syncDir(filepath.Dir(dst))
 }
 
 // Delete removes a file or (recursively) a directory, then prunes any parent

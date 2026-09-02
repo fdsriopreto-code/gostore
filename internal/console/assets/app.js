@@ -1612,6 +1612,7 @@ GOSTORE_CLUSTER_SELF=http://node2:9000 gostore server \\
       ["GOSTORE_INLINE_MAX", "131072", "objects up to this many bytes are stored inside xl.meta; <code>0</code> disables"],
       ["GOSTORE_MRF_INTERVAL", "5m", "cadence of the partial-write re-heal worker"],
       ["GOSTORE_LIST_CACHE_TTL", "15s", "per-bucket listing cache lifetime; <code>0</code> disables (re-walk every page)"],
+      ["GOSTORE_FSYNC", "on", "fsync the parent directory after every object/metadata commit so it survives a power loss; set <code>0</code> to trade that for throughput"],
     ]));
     c.append(el("h3", {}, "Built-in HTTPS (Let's Encrypt)"));
     c.append(P("Set <code>GOSTORE_TLS_DOMAIN</code> and gostore obtains and renews its own certificate — no nginx/Caddy in front. Point <code>GOSTORE_ADDRESS</code> at <code>:443</code>, publish port 80 as well (ACME HTTP-01 challenge + a redirect to https). MinIO can't do this."));

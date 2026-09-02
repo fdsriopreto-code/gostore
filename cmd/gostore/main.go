@@ -153,6 +153,7 @@ func runServer(args []string) error {
 		applyInlineMax()
 		applyListCacheTTL()
 		applyWalkKeysMax()
+		applyDirSync()
 		set, err := erasure.NewSet(spec.Disks)
 		if err != nil {
 			return fmt.Errorf("cluster erasure set: %w", err)
@@ -201,6 +202,7 @@ func runServer(args []string) error {
 	applyInlineMax()
 	applyListCacheTTL()
 	applyWalkKeysMax()
+	applyDirSync()
 
 	if cfg.SingleDisk() {
 		backend, err := fsbackend.New(cfg.VolumeGroups[0][0])
@@ -467,6 +469,16 @@ func applyWalkKeysMax() {
 	if n, err := strconv.Atoi(v); err == nil && n > 0 {
 		erasure.SetWalkKeysMax(n)
 		logger.Info("namespace walk key ceiling set", "max", n)
+	}
+}
+
+// applyDirSync honours GOSTORE_FSYNC — "0"/"false" disables the durable
+// directory fsync after each object/metadata rename (default on).
+func applyDirSync() {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("GOSTORE_FSYNC"))) {
+	case "0", "false", "no", "off":
+		storage.SetDirSync(false)
+		logger.Warn("directory fsync disabled (GOSTORE_FSYNC=0) — the last write before a power loss may be lost")
 	}
 }
 

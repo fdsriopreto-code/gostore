@@ -5,7 +5,21 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 )
+
+// dirSync gates the post-rename directory fsync (see syncDir). On by default;
+// GOSTORE_FSYNC=0 turns it off for throughput on storage that doesn't need it
+// (battery-backed cache, or when losing the very last write on power-cut is
+// acceptable).
+var dirSync atomic.Bool
+
+func init() { dirSync.Store(true) }
+
+// SetDirSync enables or disables durable directory fsyncs process-wide.
+func SetDirSync(on bool) { dirSync.Store(on) }
+
+func dirSyncEnabled() bool { return dirSync.Load() }
 
 func randomID() string {
 	var b [16]byte
@@ -38,5 +52,10 @@ func writeFileSync(path string, data []byte) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(name, path)
+	if err := os.Rename(name, path); err != nil {
+		return err
+	}
+	// Make the rename itself durable — the file bytes were fsynced above, but
+	// the directory entry that points at them was not.
+	return syncDir(filepath.Dir(path))
 }
