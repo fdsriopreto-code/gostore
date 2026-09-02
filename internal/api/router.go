@@ -176,6 +176,10 @@ func (s *Server) handleS3(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if sr, ok := w.(*statusRecorder); ok {
+		sr.s3action = s3Action(r, req, q)
+	}
+
 	if code := s.authorizeS3(r, req, q, accessKey); code != ErrNone {
 		writeErrorResponse(w, r, code, r.URL.Path)
 		return

@@ -151,6 +151,7 @@ func writeErrorResponse(w http.ResponseWriter, r *http.Request, code APIErrorCod
 	}
 	w.Header().Set("Content-Type", "application/xml")
 	w.Header().Set("x-amz-request-id", resp.RequestID)
+	w.Header().Set("x-gostore-error", ae.Code) // picked up by the activity feed
 	w.WriteHeader(ae.HTTPStatusCode)
 	_, _ = w.Write([]byte(xml.Header))
 	_, _ = w.Write(body)

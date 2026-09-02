@@ -38,6 +38,7 @@ type statusRecorder struct {
 	status    int
 	bytes     int
 	accessKey string // filled by handleS3 once the caller is known
+	s3action  string // filled by handleS3 once the request is parsed
 }
 
 func (s *statusRecorder) WriteHeader(code int) {
@@ -108,6 +109,9 @@ func withAccessLog(next http.Handler) http.Handler {
 				Time: start.UTC(), Method: r.Method, Path: r.URL.Path,
 				Status: rec.status, Bytes: rec.bytes, DurMS: dur.Milliseconds(),
 				IP: clientIP(r), Access: rec.accessKey, ReqID: requestIDFrom(r),
+				S3Action: rec.s3action,
+				Err:      rec.Header().Get("x-gostore-error"),
+				Cache:    rec.Header().Get("x-gostore-cache"),
 			})
 		}
 		logger.Info("s3 request",

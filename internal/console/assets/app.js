@@ -1135,23 +1135,45 @@ async function viewMonitoring(v) {
     " (open by default; set ", el("code", {}, "GOSTORE_METRICS_TOKEN"), " to require a bearer token). ",
     "Includes ", el("code", {}, "gostore_integrity_failures_total"), " — objects that failed end-to-end checksum verification on read; a non-zero value means shard corruption slipped past bitrot checks and should be investigated."));
 
-  // Live request feed — no external audit sink needed.
+  // Live request feed / trace — no external audit sink needed. Click a row
+  // for the full picture (S3 action, error code, request id, cache result).
   v.append(el("h3", { style: "margin:26px 0 8px;font-size:15px" }, "Recent requests"));
+  let feedErrOnly = false;
+  const feedToggle = el("button", { class: "ghost sm", onclick: () => { feedErrOnly = !feedErrOnly; feedToggle.textContent = feedErrOnly ? "Show all" : "Errors only"; loadFeed(); } }, "Errors only");
+  v.append(el("div", { class: "toolbar", style: "margin:0 0 8px" }, feedToggle));
   const feed = el("div", { class: "card", style: "overflow:auto;max-height:420px" });
   v.append(feed);
+  const traceRow = (e) => {
+    const kv = (k, val) => val ? el("div", { class: "row", style: "gap:8px" }, el("span", { class: "muted small", style: "min-width:110px" }, k), el("code", { style: "font-size:12px;word-break:break-all" }, String(val))) : null;
+    openDrawer((d) => {
+      d.append(el("div", { class: "dh" }, ic(ICON.term), el("h3", {}, e.method + " " + e.path)));
+      d.append(el("div", { style: "display:flex;flex-direction:column;gap:8px;padding:14px 0" },
+        kv("Time", new Date(e.time).toLocaleString()),
+        kv("Status", e.status + (e.err ? "  " + e.err : "")),
+        kv("S3 action", e.action),
+        kv("Duration", e.durMs + " ms"),
+        kv("Size", e.bytes ? fmtSize(e.bytes) : "0"),
+        kv("Access key", e.accessKey || "anon"),
+        kv("Client IP", e.ip),
+        kv("Cache", e.cache),
+        kv("Request ID", e.reqId)));
+      if (e.err) d.append(el("p", { class: "muted small" }, "The request was rejected — the S3 error code above is what the client received. Common causes: AccessDenied (policy/IAM), SignatureDoesNotMatch (clock skew or wrong secret), NoSuchKey, QuotaExceeded, SlowDown (rate limit)."));
+    });
+  };
   const loadFeed = async () => {
     let rows;
-    try { rows = await (await api("GET", "/gostore/admin/v1/activity", { query: { limit: "60" } })).json(); }
+    try { rows = await (await api("GET", "/gostore/admin/v1/activity", { query: { limit: "80" } })).json(); }
     catch { return; }
     if (!Array.isArray(rows)) return;
     const tb = el("tbody");
     for (const e of rows) {
-      const cls = e.status >= 500 ? "warn" : e.status >= 400 ? "warn" : "ok";
-      tb.append(el("tr", {},
+      if (feedErrOnly && e.status < 400) continue;
+      const cls = e.status >= 400 ? "warn" : "ok";
+      tb.append(el("tr", { class: "clk", onclick: () => traceRow(e) },
         el("td", { class: "muted", style: "white-space:nowrap" }, new Date(e.time).toLocaleTimeString()),
         el("td", {}, el("span", { class: "pill" }, e.method)),
         el("td", {}, el("code", { style: "font-size:11.5px" }, e.path)),
-        el("td", {}, el("span", { class: "pill " + cls }, String(e.status))),
+        el("td", {}, el("span", { class: "pill " + cls }, String(e.status)), e.err ? el("span", { class: "muted small" }, " " + e.err) : null, e.cache === "HIT" ? el("span", { class: "pill ok", style: "margin-left:4px" }, "cache") : null),
         el("td", { class: "num muted" }, e.bytes ? fmtSize(e.bytes) : ""),
         el("td", { class: "muted", style: "white-space:nowrap" }, e.durMs + " ms"),
         el("td", { class: "muted" }, e.accessKey || "anon"),
@@ -1584,7 +1606,7 @@ new PutObjectCommand({ Bucket: "b", Key: "k", Body: buf, ServerSideEncryption: "
       ["GET /gostore/admin/v1/whoami", "—", "<b>any authenticated key</b>: your identity, effective policies, admin?"],
       ["POST /gostore/admin/v1/users/rotate-secret", "<code>{accessKey, secretKey?}</code>", "give an existing user a fresh secret (old one dies immediately)"],
       ["POST /gostore/admin/v1/buckets/empty?bucket=X", "—", "delete every object (all versions) without deleting the bucket"],
-      ["GET /gostore/admin/v1/activity?limit=N", "—", "last N HTTP requests (method, path, status, key, IP) — no external audit sink needed"],
+      ["GET /gostore/admin/v1/activity?limit=N", "—", "last N HTTP requests as a trace: method, path, status, S3 action, error code, cache result, key, IP, request id, duration — no external audit sink needed"],
       ["GET /gostore/admin/v1/pool", "—", "erasure-set layout + any running decommission/rebalance"],
       ["POST /gostore/admin/v1/pool/decommission?set=N", "—", "drain set N onto the others, then it can be removed"],
       ["POST /gostore/admin/v1/pool/rebalance", "—", "relocate objects that no longer hash to the set they live on"],

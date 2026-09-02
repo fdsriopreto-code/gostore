@@ -25,6 +25,8 @@ type activityEntry struct {
 	Access   string    `json:"accessKey,omitempty"`
 	ReqID    string    `json:"reqId,omitempty"`
 	S3Action string    `json:"action,omitempty"`
+	Err      string    `json:"err,omitempty"`   // S3 error code, when the request failed
+	Cache    string    `json:"cache,omitempty"` // "HIT" when served from the hot-object cache
 }
 
 type activityRing struct {
