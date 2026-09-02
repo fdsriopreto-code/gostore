@@ -638,11 +638,13 @@ func (s *Set) readPart(ctx context.Context, bucket, key string, meta *XLMeta, pm
 	// decode output. A large multi-stripe GET no longer allocates per stripe.
 	n := s.n()
 	scratch := make([][]byte, n)
+	hbufs := make([][]byte, n)
 	for j := range scratch {
 		scratch[j] = make([]byte, fullShard)
+		hbufs[j] = make([]byte, hdr)
 	}
 	shards := make([][]byte, n)
-	hbuf := make([]byte, hdr)
+	disable := make([]bool, n)
 	var stripeBuf bytes.Buffer
 
 	for partRemaining > 0 && *remaining > 0 {
@@ -652,40 +654,59 @@ func (s *Set) readPart(ctx context.Context, bucket, key string, meta *XLMeta, pm
 		}
 		thisShardLen := ceilInt64(thisStripeLogical, int64(meta.Erasure.DataBlocks))
 
+		// Read this stripe's shard from every disk in parallel — for a remote
+		// (cluster) set this turns a sum-of-latencies into a max-of-latencies.
+		// Each goroutine touches only its own slice indices (j and di are
+		// unique per iteration), so no locking is needed.
 		for j := range shards {
 			shards[j] = nil
+			disable[j] = false
 		}
-		have := 0
+		var wg sync.WaitGroup
 		for j := 0; j < n; j++ {
 			di := dist[j]
 			rd := readers[di]
 			if rd == nil {
 				continue
 			}
-			if hdr > 0 {
-				if _, err := io.ReadFull(rd, hbuf); err != nil {
-					readers[di] = nil
-					continue
+			wg.Add(1)
+			go func(j, di int, rd io.Reader) {
+				defer wg.Done()
+				if hdr > 0 {
+					if _, err := io.ReadFull(rd, hbufs[j]); err != nil {
+						disable[j] = true
+						return
+					}
 				}
-			}
-			buf := scratch[j][:thisShardLen]
-			if _, err := io.ReadFull(rd, buf); err != nil {
-				readers[di] = nil
-				continue
-			}
-			// Bitrot check: a shard whose hash does not match is treated as
-			// missing so Reed-Solomon reconstructs it from the good shards.
-			if interleaved {
-				if !bitrotEqual(hbuf, bitrotRaw(buf)) {
-					continue
+				buf := scratch[j][:thisShardLen]
+				if _, err := io.ReadFull(rd, buf); err != nil {
+					disable[j] = true
+					return
 				}
-			} else if stripeIdx < len(pm.Checksums) && di < len(pm.Checksums[stripeIdx]) {
-				if bitrotSum(buf) != pm.Checksums[stripeIdx][di] {
-					continue
+				// Bitrot check: a shard whose hash does not match is treated as
+				// missing so Reed-Solomon reconstructs it from the good shards.
+				if interleaved {
+					if !bitrotEqual(hbufs[j], bitrotRaw(buf)) {
+						return
+					}
+				} else if stripeIdx < len(pm.Checksums) && di < len(pm.Checksums[stripeIdx]) {
+					if bitrotSum(buf) != pm.Checksums[stripeIdx][di] {
+						return
+					}
 				}
+				shards[j] = buf
+			}(j, di, rd)
+		}
+		wg.Wait()
+
+		have := 0
+		for j := 0; j < n; j++ {
+			if disable[j] {
+				readers[dist[j]] = nil
 			}
-			shards[j] = buf
-			have++
+			if shards[j] != nil {
+				have++
+			}
 		}
 		if have < meta.Erasure.DataBlocks {
 			return ErrReadQuorum
