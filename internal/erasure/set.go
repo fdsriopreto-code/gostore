@@ -234,7 +234,7 @@ func (s *Set) putObjectSSE(ctx context.Context, bucket, key string, parts []part
 		if sp != nil {
 			reader = sp.wrapForEncrypt(reader)
 		}
-		checks, ctMD5, written, full, err := s.encodePart(ctx, staging, ps.Number, dist, reader)
+		ctMD5, written, full, err := s.encodePart(ctx, staging, ps.Number, dist, reader)
 		if err != nil {
 			return nil, err
 		}
@@ -249,7 +249,7 @@ func (s *Set) putObjectSSE(ctx context.Context, bucket, key string, parts []part
 		total += written
 		meta.Parts = append(meta.Parts, PartMeta{
 			Number: ps.Number, Size: written, ActualSize: written, ETag: partETag,
-			Checksums: checks,
+			Bitrot: bitrotInterleaved,
 		})
 		if raw, derr := hex.DecodeString(partETag); derr == nil {
 			partMD5Raw = append(partMD5Raw, raw...)
@@ -348,11 +348,12 @@ func (s *Set) commitMeta(ctx context.Context, staging, bucket, key string, meta 
 	return meta, nil
 }
 
-// encodePart streams r, erasure-codes it stripe by stripe, writes one shard
-// file per disk under staging, and records a per-stripe per-disk bitrot
-// checksum. Returns checksums[stripe][diskIndex], the md5 of the plaintext,
-// and the number of plaintext bytes consumed.
-func (s *Set) encodePart(ctx context.Context, staging string, partNum int, dist []int, r io.Reader) ([][]string, string, int64, bool, error) {
+// encodePart streams r, erasure-codes it stripe by stripe, and writes one
+// shard file per disk under staging in the interleaved-bitrot format: each
+// stripe's shard is preceded by its 32-byte HighwayHash. Nothing is recorded
+// in xl.meta. Returns the md5 of the plaintext, the number of plaintext
+// bytes consumed, and whether every disk took the write.
+func (s *Set) encodePart(ctx context.Context, staging string, partNum int, dist []int, r io.Reader) (string, int64, bool, error) {
 	n := s.n()
 	pipes := make([]*io.PipeWriter, n)
 	errCh := make(chan error, n)
@@ -376,7 +377,6 @@ func (s *Set) encodePart(ctx context.Context, staging string, partNum int, dist 
 	stripe := make([]byte, s.ec.stripeInputSize())
 	var total int64
 	var encErr error
-	var checksums [][]string
 
 	for {
 		nr, rerr := io.ReadFull(r, stripe)
@@ -394,19 +394,20 @@ func (s *Set) encodePart(ctx context.Context, staging string, partNum int, dist 
 				encErr = err
 				break
 			}
-			row := make([]string, n)
 			for j := 0; j < n; j++ {
 				di := dist[j]
+				if _, err := pipes[di].Write(bitrotRaw(shards[j])); err != nil {
+					encErr = err
+					break
+				}
 				if _, err := pipes[di].Write(shards[j]); err != nil {
 					encErr = err
 					break
 				}
-				row[di] = bitrotSum(shards[j])
 			}
 			if encErr != nil {
 				break
 			}
-			checksums = append(checksums, row)
 		}
 		if rerr != nil { // EOF / ErrUnexpectedEOF => that was the final stripe
 			break
@@ -424,7 +425,7 @@ func (s *Set) encodePart(ctx context.Context, staging string, partNum int, dist 
 	close(errCh)
 
 	if encErr != nil {
-		return nil, "", 0, false, encErr
+		return "", 0, false, encErr
 	}
 	writeOK := 0
 	for e := range errCh {
@@ -433,9 +434,9 @@ func (s *Set) encodePart(ctx context.Context, staging string, partNum int, dist 
 		}
 	}
 	if writeOK < s.writeQuorum() {
-		return nil, "", 0, false, ErrWriteQuorum
+		return "", 0, false, ErrWriteQuorum
 	}
-	return checksums, hex.EncodeToString(plainMD5.Sum(nil)), total, writeOK == n, nil
+	return hex.EncodeToString(plainMD5.Sum(nil)), total, writeOK == n, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -546,8 +547,16 @@ func (s *Set) getObject(ctx context.Context, bucket, key string, off, length int
 // readPart decodes and emits the wanted slice of one part. skip/remaining are
 // updated in place.
 func (s *Set) readPart(ctx context.Context, bucket, key string, meta *XLMeta, pm PartMeta, dist []int, stripeLen, fullShard int64, skip, remaining *int64, w io.Writer) error {
+	interleaved := pm.Bitrot == bitrotInterleaved
+	var hdr int64
+	stride := fullShard
+	if interleaved {
+		hdr = bitrotHashSize
+		stride = fullShard + bitrotHashSize
+	}
+
 	firstStripe := *skip / stripeLen
-	shardOffset := firstStripe * fullShard
+	shardOffset := firstStripe * stride
 
 	readers, closers := s.openShards(ctx, bucket, key, pm.Number, shardOffset)
 	defer func() {
@@ -577,6 +586,14 @@ func (s *Set) readPart(ctx context.Context, bucket, key string, meta *XLMeta, pm
 			if rd == nil {
 				continue
 			}
+			var hbuf []byte
+			if hdr > 0 {
+				hbuf = make([]byte, hdr)
+				if _, err := io.ReadFull(rd, hbuf); err != nil {
+					readers[di] = nil
+					continue
+				}
+			}
 			buf := make([]byte, thisShardLen)
 			if _, err := io.ReadFull(rd, buf); err != nil {
 				readers[di] = nil
@@ -584,7 +601,11 @@ func (s *Set) readPart(ctx context.Context, bucket, key string, meta *XLMeta, pm
 			}
 			// Bitrot check: a shard whose hash does not match is treated as
 			// missing so Reed-Solomon reconstructs it from the good shards.
-			if stripeIdx < len(pm.Checksums) && di < len(pm.Checksums[stripeIdx]) {
+			if interleaved {
+				if !bitrotEqual(hbuf, bitrotRaw(buf)) {
+					continue
+				}
+			} else if stripeIdx < len(pm.Checksums) && di < len(pm.Checksums[stripeIdx]) {
 				if bitrotSum(buf) != pm.Checksums[stripeIdx][di] {
 					continue
 				}

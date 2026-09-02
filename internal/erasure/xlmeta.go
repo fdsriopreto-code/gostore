@@ -72,10 +72,15 @@ type PartMeta struct {
 	ActualSize int64  `json:"actualSize"` // same as Size in M4 (no compression/SSE)
 	ETag       string `json:"etag"`       // md5 hex of the part plaintext
 
+	// Bitrot names the shard-integrity scheme for this part:
+	//   bitrotInterleaved — hashes are stored inline in the shard files
+	//                       ([hash|block] per stripe); Checksums is empty.
+	//   "" (legacy)       — hashes are in Checksums below.
+	Bitrot string `json:"bitrot,omitempty"`
+
 	// Checksums[stripe][diskIndex] = hex bitrot hash of that disk's shard for
-	// that stripe. Lets a single corrupted shard be excluded before Reed-
-	// Solomon reconstruction, and works for ranged reads.
-	Checksums [][]string `json:"checksums"`
+	// that stripe. Only populated for legacy (pre-streaming-bitrot) parts.
+	Checksums [][]string `json:"checksums,omitempty"`
 }
 
 func (m *XLMeta) marshal() ([]byte, error) { return json.Marshal(m) }

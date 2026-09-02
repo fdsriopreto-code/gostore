@@ -178,6 +178,7 @@ func (s *Set) shardIntact(ctx context.Context, d Disk, bucket, partPath string, 
 	}
 	defer rc.Close()
 
+	interleaved := pm.Bitrot == bitrotInterleaved
 	stripeInput := m.Erasure.BlockSize * int64(m.Erasure.DataBlocks)
 	remaining := pm.Size
 	stripe := 0
@@ -187,11 +188,22 @@ func (s *Set) shardIntact(ctx context.Context, d Disk, bucket, partPath string, 
 			logical = remaining
 		}
 		shardLen := ceilInt64(logical, int64(m.Erasure.DataBlocks))
+		var hbuf []byte
+		if interleaved {
+			hbuf = make([]byte, bitrotHashSize)
+			if _, err := io.ReadFull(rc, hbuf); err != nil {
+				return false
+			}
+		}
 		buf := make([]byte, shardLen)
 		if _, err := io.ReadFull(rc, buf); err != nil {
 			return false
 		}
-		if stripe < len(pm.Checksums) && diskIdx < len(pm.Checksums[stripe]) {
+		if interleaved {
+			if !bitrotEqual(hbuf, bitrotRaw(buf)) {
+				return false
+			}
+		} else if stripe < len(pm.Checksums) && diskIdx < len(pm.Checksums[stripe]) {
 			if bitrotSum(buf) != pm.Checksums[stripe][diskIdx] {
 				return false
 			}
@@ -235,6 +247,7 @@ func (s *Set) rebuildShard(ctx context.Context, bucket, partPath string, partIdx
 		}
 	}()
 
+	interleaved := pm.Bitrot == bitrotInterleaved
 	stripeInput := m.Erasure.BlockSize * int64(m.Erasure.DataBlocks)
 	var out bytes.Buffer
 	remaining := pm.Size
@@ -254,12 +267,24 @@ func (s *Set) rebuildShard(ctx context.Context, bucket, partPath string, partIdx
 			if srcDisk == di || readers[srcDisk] == nil {
 				continue
 			}
+			var hbuf []byte
+			if interleaved {
+				hbuf = make([]byte, bitrotHashSize)
+				if _, err := io.ReadFull(readers[srcDisk], hbuf); err != nil {
+					readers[srcDisk] = nil
+					continue
+				}
+			}
 			buf := make([]byte, shardLen)
 			if _, err := io.ReadFull(readers[srcDisk], buf); err != nil {
 				readers[srcDisk] = nil
 				continue
 			}
-			if stripeIdx < len(pm.Checksums) && srcDisk < len(pm.Checksums[stripeIdx]) &&
+			if interleaved {
+				if !bitrotEqual(hbuf, bitrotRaw(buf)) {
+					continue
+				}
+			} else if stripeIdx < len(pm.Checksums) && srcDisk < len(pm.Checksums[stripeIdx]) &&
 				bitrotSum(buf) != pm.Checksums[stripeIdx][srcDisk] {
 				continue
 			}
@@ -271,6 +296,9 @@ func (s *Set) rebuildShard(ctx context.Context, bucket, partPath string, partIdx
 		}
 		if err := s.ec.Reconstruct(shards); err != nil {
 			return err
+		}
+		if interleaved {
+			out.Write(bitrotRaw(shards[targetJ]))
 		}
 		out.Write(shards[targetJ])
 		remaining -= logical
