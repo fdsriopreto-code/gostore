@@ -12,7 +12,7 @@ func (p *Pool) PutObjectTags(ctx context.Context, bucket, key, tags string, _ ob
 	if err := p.ensureBucket(ctx, bucket); err != nil {
 		return object.ObjectInfo{}, err
 	}
-	set := p.setFor(key)
+	set := p.locate(ctx, bucket, key)
 	lk := p.NewNSLock(bucket, key)
 	c, _ := lk.GetLock(ctx, 0)
 	defer lk.Unlock(c)
@@ -37,7 +37,7 @@ func (p *Pool) PutObjectTags(ctx context.Context, bucket, key, tags string, _ ob
 }
 
 func (p *Pool) GetObjectTags(ctx context.Context, bucket, key string, _ object.ObjectOptions) (string, error) {
-	m, err := p.setFor(key).readMeta(ctx, bucket, key)
+	m, err := p.locate(ctx, bucket, key).readMeta(ctx, bucket, key)
 	if err != nil {
 		return "", mapErr(err)
 	}

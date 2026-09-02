@@ -1,9 +1,11 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/lojadopocket/gostore/internal/erasure"
@@ -48,6 +50,12 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, u)
+	case path == "pool" && r.Method == http.MethodGet:
+		s.adminPoolStatus(w)
+	case path == "pool/decommission" && r.Method == http.MethodPost:
+		s.adminPoolDecommission(w, r)
+	case path == "pool/rebalance" && r.Method == http.MethodPost:
+		s.adminPoolRebalance(w)
 	case path == "users" && r.Method == http.MethodGet:
 		writeJSON(w, http.StatusOK, s.iam.ListUsers())
 	case path == "users" && r.Method == http.MethodPut:
@@ -132,6 +140,51 @@ func (s *Server) adminHeal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, rep)
+}
+
+func (s *Server) erasurePool() (*erasure.Pool, bool) {
+	p, ok := s.obj.(*erasure.Pool)
+	return p, ok
+}
+
+func (s *Server) adminPoolStatus(w http.ResponseWriter) {
+	pool, ok := s.erasurePool()
+	if !ok {
+		writeJSON(w, http.StatusOK, map[string]any{"sets": 1, "draining": []int{}})
+		return
+	}
+	writeJSON(w, http.StatusOK, pool.PoolStatus())
+}
+
+func (s *Server) adminPoolDecommission(w http.ResponseWriter, r *http.Request) {
+	pool, ok := s.erasurePool()
+	if !ok {
+		writeJSONError(w, http.StatusBadRequest, "not an erasure pool")
+		return
+	}
+	idx, err := strconv.Atoi(r.URL.Query().Get("set"))
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "set query param must be an integer")
+		return
+	}
+	if err := pool.Decommission(r.Context(), idx); err != nil {
+		writeJSONError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, pool.PoolStatus())
+}
+
+func (s *Server) adminPoolRebalance(w http.ResponseWriter) {
+	pool, ok := s.erasurePool()
+	if !ok {
+		writeJSONError(w, http.StatusBadRequest, "not an erasure pool")
+		return
+	}
+	if err := pool.Rebalance(context.Background()); err != nil {
+		writeJSONError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, pool.PoolStatus())
 }
 
 func backendMode(t string) string {

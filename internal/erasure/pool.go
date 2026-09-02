@@ -7,8 +7,10 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/lojadopocket/gostore/internal/configstore"
 	"github.com/lojadopocket/gostore/internal/object"
 	"github.com/lojadopocket/gostore/internal/storage"
 )
@@ -24,6 +26,17 @@ type Pool struct {
 
 	nsMu   sync.Mutex
 	nsLock map[string]*sync.RWMutex
+
+	// pool layout: set indices that are being decommissioned. When empty
+	// (the common case) hasInactive is false and set placement is the plain
+	// hash over every set — zero extra cost. See decommission.go.
+	layoutMu    sync.RWMutex
+	draining    map[int]bool
+	hasInactive atomic.Bool
+	cfgStore    configstore.Backend
+	decomMu     sync.Mutex // one decommission / rebalance at a time
+	progMu      sync.Mutex // guards decom
+	decom       decomProgress
 }
 
 var _ object.Layer = (*Pool)(nil)
@@ -45,13 +58,25 @@ func FromDisks(disks []Disk) (*Pool, error) {
 	return NewPool(set)
 }
 
+func keyHash(key string) uint32 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(key))
+	return h.Sum32()
+}
+
+// setFor returns the write target for a key: the plain hash over every set,
+// unless a decommission is in progress, in which case draining sets are
+// excluded so new writes land only on sets that will remain.
 func (p *Pool) setFor(key string) *Set {
 	if len(p.sets) == 1 {
 		return p.sets[0]
 	}
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(key))
-	return p.sets[int(h.Sum32())%len(p.sets)]
+	if p.hasInactive.Load() {
+		if act := p.activeSets(); len(act) > 0 {
+			return act[int(keyHash(key))%len(act)]
+		}
+	}
+	return p.sets[int(keyHash(key))%len(p.sets)]
 }
 
 // --- lifecycle / introspection ---------------------------------------
@@ -204,7 +229,7 @@ func (p *Pool) PutObject(ctx context.Context, bucket, key string, data *object.P
 	defer lk.Unlock(c)
 
 	if opts.CheckPrecondFn != nil {
-		if m, err := p.setFor(key).statObject(ctx, bucket, key); err == nil {
+		if m, err := p.locate(ctx, bucket, key).statObject(ctx, bucket, key); err == nil {
 			if opts.CheckPrecondFn(metaToInfo(bucket, key, m)) {
 				return object.ObjectInfo{}, object.ErrPreconditionFailed
 			}
@@ -244,7 +269,7 @@ func (p *Pool) GetObjectInfo(ctx context.Context, bucket, key string, opts objec
 		// VersionID=="" and nothing in the version store: fall through in case
 		// this is an object that predates versioning.
 	}
-	m, err := p.setFor(key).statObject(ctx, bucket, key)
+	m, err := p.locate(ctx, bucket, key).statObject(ctx, bucket, key)
 	if err != nil {
 		return object.ObjectInfo{}, mapErr(err)
 	}
@@ -261,7 +286,7 @@ func (p *Pool) GetObjectNInfo(ctx context.Context, bucket, key string, rs *objec
 			return gr, err
 		}
 	}
-	set := p.setFor(key)
+	set := p.locate(ctx, bucket, key)
 	m, err := set.statObject(ctx, bucket, key)
 	if err != nil {
 		return nil, mapErr(err)
@@ -331,7 +356,7 @@ func (p *Pool) DeleteObject(ctx context.Context, bucket, key string, opts object
 	lk := p.NewNSLock(bucket, key)
 	c, _ := lk.GetLock(ctx, 0)
 	defer lk.Unlock(c)
-	if err := p.setFor(key).deleteObject(ctx, bucket, key); err != nil {
+	if err := p.locate(ctx, bucket, key).deleteObject(ctx, bucket, key); err != nil {
 		return object.ObjectInfo{}, mapErr(err)
 	}
 	return object.ObjectInfo{Bucket: bucket, Name: key}, nil

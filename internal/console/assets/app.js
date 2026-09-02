@@ -1032,6 +1032,9 @@ new PutObjectCommand({ Bucket: "b", Key: "k", Body: buf, ServerSideEncryption: "
       ["POST /gostore/admin/v1/heal", "—", "reconstruct missing/corrupt shards (erasure)"],
       ["POST /gostore/admin/v1/scanner/run", "—", "run one scan pass now (lifecycle + usage + heal sample)"],
       ["GET /gostore/admin/v1/datausage", "—", "per-bucket object counts &amp; byte totals from the last scan"],
+      ["GET /gostore/admin/v1/pool", "—", "erasure-set layout + any running decommission/rebalance"],
+      ["POST /gostore/admin/v1/pool/decommission?set=N", "—", "drain set N onto the others, then it can be removed"],
+      ["POST /gostore/admin/v1/pool/rebalance", "—", "relocate objects that no longer hash to the set they live on"],
     ]));
     c.append(el("h3", {}, "Example — curl with SigV4"));
     c.append(codeBlock(
@@ -1071,8 +1074,9 @@ GOSTORE_CLUSTER_SELF=http://node2:9000 gostore server \\
       "A write that reaches quorum but not every disk is queued for background re-heal (<code>GOSTORE_MRF_INTERVAL</code>, default 5m).",
       "A replaced or freshly-added disk is detected at startup and repopulated by an automatic heal pass.",
       "Namespace locks retry with backoff up to 10s; if a lock holder loses quorum mid-operation, its context is cancelled so the write aborts instead of racing.",
+      "Capacity management: <code>POST /gostore/admin/v1/pool/decommission?set=N</code> drains a set onto the others so its disks can be pulled; <code>/pool/rebalance</code> evens out placement after a change. Both run online and survive a restart.",
     ));
-    c.append(callout("Current limits", "Membership is static (restart every node with the same topology). No automatic rebalancing when adding nodes, and no multiplexed transport yet (one HTTP round-trip per inter-node disk op).", "warn"));
+    c.append(callout("Current limits", "Membership is static — restart every node with the same topology to add or remove nodes. Small disk RPCs share one multiplexed connection per peer; bulk shard transfers use their own HTTP stream. Capacity changes are handled by decommission + rebalance (Admin API → <code>/pool</code>).", "warn"));
   }},
 
   { id: "config", group: "Operations", icon: ICON.term, title: "Server configuration", body: (c) => {
@@ -1108,7 +1112,7 @@ GOSTORE_CLUSTER_SELF=http://node2:9000 gostore server \\
       "<b>IAM groups</b> and <b>OIDC / LDAP</b> STS federation.",
       "<b>Lifecycle</b> storage-class transitions (only expiration).",
       "<b>Replication</b> has no persistent retry queue (best-effort, 3 tries).",
-      "<b>Cluster</b>: static membership, no pool rebalancing/decommission, one HTTP round-trip per inter-node disk op (no multiplexed transport).",
+      "<b>Cluster</b>: static membership (topology changes need a restart); decommission/rebalance are online but replay object writes rather than moving raw shards.",
       "Virtual-host-style addressing is off by default (set <code>GOSTORE_DOMAIN</code> to enable). SigV2 is not supported — SigV4 only.",
     ));
     c.append(callout("What definitely works", "Buckets, objects, multipart, range & conditional requests, presigned URLs, versioning, Object Lock, lifecycle expiry, tagging, bucket policies (incl. anonymous), CORS, SSE-S3, event webhooks, replication, IAM users/service-accounts/policies (cluster-wide via the object layer), STS AssumeRole, erasure coding with interleaved-bitrot protection, inline small objects, MRF + scanner + new-disk auto-heal, per-bucket data-usage stats, per-bucket listing cache, and a multi-node cluster.", "tip"));

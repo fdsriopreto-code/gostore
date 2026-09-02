@@ -269,6 +269,7 @@ func serve(cfg config.Config, obj object.Layer, clusterRPC http.Handler) error {
 		}
 		pool.EnableMRF(cb)
 		pool.StartMRF(refreshCtx)
+		pool.LoadLayout(cb)
 		pool.AutoHeal(refreshCtx)
 	}
 

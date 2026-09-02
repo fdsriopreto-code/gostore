@@ -42,7 +42,7 @@ func (s *Set) syncCurrentLock(ctx context.Context, bucket, key string, e vlogEnt
 }
 
 func (p *Pool) PutObjectRetention(ctx context.Context, bucket, key, versionID, mode string, until time.Time, bypassGovernance bool) error {
-	set := p.setFor(key)
+	set := p.locate(ctx, bucket, key)
 	lk := p.NewNSLock(bucket, key)
 	c, _ := lk.GetLock(ctx, 0)
 	defer lk.Unlock(c)
@@ -72,7 +72,7 @@ func (p *Pool) PutObjectRetention(ctx context.Context, bucket, key, versionID, m
 }
 
 func (p *Pool) GetObjectRetention(ctx context.Context, bucket, key, versionID string) (string, time.Time, error) {
-	i, vlog, err := p.setFor(key).findVlogEntry(ctx, bucket, key, versionID)
+	i, vlog, err := p.locate(ctx, bucket, key).findVlogEntry(ctx, bucket, key, versionID)
 	if err != nil {
 		return "", time.Time{}, err
 	}
@@ -80,7 +80,7 @@ func (p *Pool) GetObjectRetention(ctx context.Context, bucket, key, versionID st
 }
 
 func (p *Pool) PutObjectLegalHold(ctx context.Context, bucket, key, versionID, status string) error {
-	set := p.setFor(key)
+	set := p.locate(ctx, bucket, key)
 	lk := p.NewNSLock(bucket, key)
 	c, _ := lk.GetLock(ctx, 0)
 	defer lk.Unlock(c)
@@ -98,7 +98,7 @@ func (p *Pool) PutObjectLegalHold(ctx context.Context, bucket, key, versionID, s
 }
 
 func (p *Pool) GetObjectLegalHold(ctx context.Context, bucket, key, versionID string) (string, error) {
-	i, vlog, err := p.setFor(key).findVlogEntry(ctx, bucket, key, versionID)
+	i, vlog, err := p.locate(ctx, bucket, key).findVlogEntry(ctx, bucket, key, versionID)
 	if err != nil {
 		return "", err
 	}

@@ -83,9 +83,8 @@ MessagePack em tudo, e ~15 anos de casos extremos acumulados.
 
 ## Estado de implementação
 
-As oito melhorias de maior valor da lista abaixo **já foram implementadas**
-(commits nesta branch). Restam #9 (transporte multiplexado) e #10
-(decommission/rebalance de pool), ambas de esforço alto e baixa prioridade.
+Todas as 10 melhorias da lista abaixo **já foram implementadas** (commits
+nesta branch).
 
 | # | Melhoria | Status | Como usar / ajustar |
 |---|---|---|---|
@@ -97,8 +96,8 @@ As oito melhorias de maior valor da lista abaixo **já foram implementadas**
 | 6 | Retry no dsync + cancelamento por perda de lock | ✅ feito | automático; timeout de aquisição 10 s |
 | 7 | Scanner: contabilização de uso + heal oportunista | ✅ feito | `GET /gostore/admin/v1/datausage`; heal 1-em-128 por passada |
 | 8 | Auto-heal de disco novo / substituído | ✅ feito | automático no boot (backend erasure) |
-| 9 | Transporte multiplexado persistente entre nós | ⏳ pendente | — |
-| 10 | Decommission e rebalance de pool | ⏳ pendente | — |
+| 9 | Transporte multiplexado persistente entre nós | ✅ feito | automático; 1 conexão por par de nós via handshake `Upgrade: gostore-grid`, com fallback HTTP para binário antigo |
+| 10 | Decommission e rebalance de pool | ✅ feito | `POST /gostore/admin/v1/pool/decommission?set=N`, `POST /gostore/admin/v1/pool/rebalance`, `GET /gostore/admin/v1/pool` |
 
 ## Lista de melhorias (ranqueada)
 
@@ -163,17 +162,28 @@ passada; acumular contagem de objetos + bytes por bucket e expor em
 Detectar um disco não formatado ou vazio no boot (ou quando volta online) e
 healar todo objeto que deveria ter um shard ali. Depende do #4 + #7.
 
-### 9. Transporte multiplexado persistente entre nós — *valor médio, esforço alto*
+### 9. Transporte multiplexado persistente entre nós — ✅ feito
 
-Trocar o HTTP-por-operação do `RemoteDisk` por uma conexão longa com
-multiplexação de requests (um protocolo pequeno com framing sobre um único
-stream HTTP/2 ou websocket keep-alive). Puro throughput/latência; a corretude
-já está ok.
+`internal/cluster/grid.go`: uma conexão TCP/TLS longa por par de nós, obtida
+por um handshake HTTP `Upgrade: gostore-grid`, depois frames
+`[tipo|id|len|payload]` nos dois sentidos com demux por id de 64 bits. Todas
+as operações pequenas de disco (`WriteAll`/`ReadAll`/`StatVol`/`ListVols`/
+`RenameDir`/`Delete`/`ListDir`/`DiskInfo`/`ping`) passam por ela; streaming
+de shard (`CreateFile`/`ReadFileStream`) continua com request HTTP próprio.
+Fallback automático para HTTP-por-operação se o peer não responder o
+handshake.
 
-### 10. Decommission e rebalance de pool — *baixa prioridade, esforço alto*
+### 10. Decommission e rebalance de pool — ✅ feito
 
-Só importa quando se adiciona/remove capacidade em escala. Fora de escopo
-até existir um deploy real com múltiplos pools.
+`internal/erasure/decommission.go`: um set pode ser marcado "draining" —
+`setFor` para de mandar escritas novas pra ele e um worker de fundo move
+todo objeto (todas as versões, replay do vlog) pros sets restantes; quando
+esvazia, os discos podem ser removidos. `Rebalance` aplica a mesma máquina a
+todos os sets, realocando objetos que não fazem mais hash pro set onde
+estão. Layout persistido em `pool/layout.json` (sobrevive a restart).
+Admin API: `GET/POST /gostore/admin/v1/pool[/decommission?set=N|/rebalance]`.
+Leituras durante o dreno usam `locate()`, que varre os outros sets se o
+objeto não estiver onde o hash aponta.
 
 ## O que o gostore faz de propósito diferente (e está tudo bem)
 

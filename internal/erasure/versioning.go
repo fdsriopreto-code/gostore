@@ -114,16 +114,20 @@ func (s *Set) archiveCurrent(ctx context.Context, bucket, key string) (string, e
 
 // putObjectVersioned writes a new version and makes it current.
 func (p *Pool) putObjectVersioned(ctx context.Context, bucket, key string, data *object.PutObjReader, opts object.ObjectOptions) (object.ObjectInfo, error) {
+	lk := p.NewNSLock(bucket, key)
+	c, _ := lk.GetLock(ctx, 0)
+	defer lk.Unlock(c)
+	return p.putObjectVersionedOn(ctx, p.setFor(key), bucket, key, data, opts)
+}
+
+// putObjectVersionedOn assumes the caller holds the namespace lock.
+func (p *Pool) putObjectVersionedOn(ctx context.Context, set *Set, bucket, key string, data *object.PutObjReader, opts object.ObjectOptions) (object.ObjectInfo, error) {
 	if err := p.ensureBucket(ctx, bucket); err != nil {
 		return object.ObjectInfo{}, err
 	}
 	if !validObjectName(key) {
 		return object.ObjectInfo{}, object.ErrObjectNameInvalid
 	}
-	set := p.setFor(key)
-	lk := p.NewNSLock(bucket, key)
-	c, _ := lk.GetLock(ctx, 0)
-	defer lk.Unlock(c)
 
 	vlog, err := set.readVlog(ctx, bucket, key)
 	if err != nil {
@@ -210,7 +214,10 @@ func (s *Set) resolveVersionDir(ctx context.Context, bucket, key, versionID stri
 }
 
 func (p *Pool) getVersioned(ctx context.Context, bucket, key string, rs *object.HTTPRangeSpec, opts object.ObjectOptions) (*object.GetObjectReader, error) {
-	set := p.setFor(key)
+	return p.getVersionedOn(ctx, p.locate(ctx, bucket, key), bucket, key, rs, opts)
+}
+
+func (p *Pool) getVersionedOn(ctx context.Context, set *Set, bucket, key string, rs *object.HTTPRangeSpec, opts object.ObjectOptions) (*object.GetObjectReader, error) {
 	dir, _, err := set.resolveVersionDir(ctx, bucket, key, opts.VersionID)
 	if err != nil {
 		return nil, err
@@ -262,7 +269,7 @@ func (p *Pool) getVersioned(ctx context.Context, bucket, key string, rs *object.
 }
 
 func (p *Pool) statVersioned(ctx context.Context, bucket, key, versionID string) (object.ObjectInfo, error) {
-	set := p.setFor(key)
+	set := p.locate(ctx, bucket, key)
 	dir, _, err := set.resolveVersionDir(ctx, bucket, key, versionID)
 	if err != nil {
 		return object.ObjectInfo{}, err
@@ -280,11 +287,14 @@ func (p *Pool) statVersioned(ctx context.Context, bucket, key, versionID string)
 }
 
 func (p *Pool) deleteVersioned(ctx context.Context, bucket, key string, opts object.ObjectOptions) (object.ObjectInfo, error) {
-	set := p.setFor(key)
 	lk := p.NewNSLock(bucket, key)
 	c, _ := lk.GetLock(ctx, 0)
 	defer lk.Unlock(c)
+	return p.deleteVersionedOn(ctx, p.locate(ctx, bucket, key), bucket, key, opts)
+}
 
+// deleteVersionedOn assumes the caller holds the namespace lock.
+func (p *Pool) deleteVersionedOn(ctx context.Context, set *Set, bucket, key string, opts object.ObjectOptions) (object.ObjectInfo, error) {
 	vlog, err := set.readVlog(ctx, bucket, key)
 	if err != nil {
 		return object.ObjectInfo{}, err
@@ -401,15 +411,16 @@ func (p *Pool) listVersions(ctx context.Context, bucket, prefix, delimiter strin
 	if maxKeys <= 0 || maxKeys > 1000 {
 		maxKeys = 1000
 	}
-	set := p.sets[0]
-	live, _ := set.walkKeys(ctx, bucket)
-	vk, _ := set.walkVlogKeys(ctx, bucket)
 	seen := map[string]bool{}
 	var keys []string
-	for _, k := range append(live, vk...) {
-		if !seen[k] {
-			seen[k] = true
-			keys = append(keys, k)
+	for _, set := range p.sets {
+		live, _ := set.walkKeys(ctx, bucket)
+		vk, _ := set.walkVlogKeys(ctx, bucket)
+		for _, k := range append(live, vk...) {
+			if !seen[k] {
+				seen[k] = true
+				keys = append(keys, k)
+			}
 		}
 	}
 	sort.Strings(keys)
@@ -432,7 +443,7 @@ func (p *Pool) listVersions(ctx context.Context, bucket, prefix, delimiter strin
 				continue
 			}
 		}
-		s := p.setFor(k)
+		s := p.locate(ctx, bucket, k)
 		vlog, _ := s.readVlog(ctx, bucket, k)
 		if len(vlog) == 0 {
 			if m, e := s.readMeta(ctx, bucket, k); e == nil {
@@ -495,8 +506,12 @@ func (p *Pool) listVersions(ctx context.Context, bucket, prefix, delimiter strin
 
 // bucketHasVersions reports whether the bucket has any version logs.
 func (p *Pool) bucketHasVersions(ctx context.Context, bucket string) bool {
-	vk, _ := p.sets[0].walkVlogKeys(ctx, bucket)
-	return len(vk) > 0
+	for _, set := range p.sets {
+		if vk, _ := set.walkVlogKeys(ctx, bucket); len(vk) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 var _ = http.Header(nil)
