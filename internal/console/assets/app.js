@@ -1602,6 +1602,8 @@ GOSTORE_CLUSTER_SELF=http://node2:9000 gostore server \\
       ["GOSTORE_NO_CONTENT_TYPE_SNIFF", "set to <code>1</code> to stop guessing an object's Content-Type from its key extension when the client sent none / <code>application/octet-stream</code>"],
       ["GOSTORE_METRICS_TOKEN", "when set, <code>GET /gostore/metrics</code> requires <code>Authorization: Bearer &lt;token&gt;</code> (otherwise the endpoint is open)"],
       ["GOSTORE_RATE_LIMIT / GOSTORE_RATE_BURST", "requests/sec per access key (per IP for anonymous), and bucket size — over the limit gets <code>503 SlowDown</code>. Unset = no limit."],
+      ["GOSTORE_IDLE_TIMEOUT", "kill a request whose body stalls this long (default <code>90s</code>, <code>0</code> disables) so a hung upload can't pin an object's lock"],
+      ["GOSTORE_LIST_MAX_KEYS", "ceiling on keys one namespace walk holds in memory (default <code>2000000</code>); past it, listing is truncated — use a prefix"],
     ]));
     c.append(el("h3", {}, "Background work & erasure tuning"));
     c.append(TBL(["Variable", "Default", "Purpose"], [

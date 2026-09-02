@@ -74,6 +74,7 @@ func NewServer(cfg config.Config, obj object.Layer, im *iam.Manager, bc *bucketc
 		withRequestID,
 		withRecover,
 		withAccessLog,
+		withBodyIdleTimeout,
 	)
 }
 

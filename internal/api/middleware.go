@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"io"
 	"net/http"
+	"os"
 	"runtime/debug"
 	"time"
 
@@ -51,6 +53,10 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 	s.bytes += n
 	return n, err
 }
+
+// Unwrap lets http.NewResponseController reach the real ResponseWriter for
+// Flush / SetReadDeadline / Hijack.
+func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
 
 // chain applies middlewares in order (first listed runs outermost).
 func chain(h http.Handler, mw ...func(http.Handler) http.Handler) http.Handler {
@@ -116,3 +122,39 @@ func withAccessLog(next http.Handler) http.Handler {
 		)
 	})
 }
+
+// withBodyIdleTimeout bumps the connection read deadline before every request
+// body Read, so a client that opens a PUT and then stalls can't pin the
+// object's namespace lock forever — a stuck read fails and the handler
+// unwinds. A slow-but-progressing upload is fine (each Read pushes the
+// deadline out). GOSTORE_IDLE_TIMEOUT (default 90s), 0 disables.
+func idleTimeoutSetting() time.Duration {
+	if v := os.Getenv("GOSTORE_IDLE_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return 90 * time.Second
+}
+
+func withBodyIdleTimeout(next http.Handler) http.Handler {
+	d := idleTimeoutSetting()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if d > 0 && r.Body != nil && r.ContentLength != 0 {
+			r.Body = &deadlineBody{rc: r.Body, ctl: http.NewResponseController(w), d: d}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+type deadlineBody struct {
+	rc  io.ReadCloser
+	ctl *http.ResponseController
+	d   time.Duration
+}
+
+func (b *deadlineBody) Read(p []byte) (int, error) {
+	_ = b.ctl.SetReadDeadline(time.Now().Add(b.d))
+	return b.rc.Read(p)
+}
+func (b *deadlineBody) Close() error { return b.rc.Close() }

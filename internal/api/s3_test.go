@@ -972,3 +972,52 @@ func TestRateLimitAndEmptyBucket(t *testing.T) {
 		t.Fatalf("bucket not empty after empty op: %s", b)
 	}
 }
+
+// slowReader yields `head` immediately then blocks until unblock is closed.
+type slowReader struct {
+	head    []byte
+	off     int
+	unblock chan struct{}
+}
+
+func (s *slowReader) Read(p []byte) (int, error) {
+	if s.off < len(s.head) {
+		n := copy(p, s.head[s.off:])
+		s.off += n
+		return n, nil
+	}
+	<-s.unblock
+	return 0, io.EOF
+}
+
+func TestBodyIdleTimeout(t *testing.T) {
+	t.Setenv("GOSTORE_IDLE_TIMEOUT", "300ms")
+	srv := newTestServer(t)
+	if r := do(t, srv, http.MethodPut, "/idlebk", []byte{}, nil); r.StatusCode != 200 {
+		t.Fatalf("mb: %d", r.StatusCode)
+	}
+
+	body := &slowReader{head: []byte("partial"), unblock: make(chan struct{})}
+	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/idlebk/stuck", body)
+	req.ContentLength = 5000 // claim more than we'll send
+	req.Header.Set("X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD")
+	signV4(t, req, nil)
+
+	done := make(chan error, 1)
+	go func() {
+		resp, err := srv.Client().Do(req)
+		if resp != nil {
+			resp.Body.Close()
+		}
+		done <- err
+	}()
+
+	select {
+	case <-done:
+		// request finished (with an error / non-2xx) instead of hanging — good
+	case <-time.After(5 * time.Second):
+		close(body.unblock)
+		t.Fatal("stalled PUT did not time out — the namespace lock would be pinned")
+	}
+	close(body.unblock)
+}
