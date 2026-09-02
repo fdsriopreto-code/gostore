@@ -84,7 +84,9 @@ func (p *Pool) ReadConfig(ctx context.Context, key string) ([]byte, error) {
 	// or stale, write the winner back (once at a time per key) so a later
 	// quorum failure can't lose the config.
 	if bestN >= configQuorum(len(disks)) && bestN < len(disks) && repairGate(key) {
+		repairWG.Add(1)
 		go func(w []byte) {
+			defer repairWG.Done()
 			defer repairDone(key)
 			for i, d := range disks {
 				if len(blobs[i]) != len(w) || sha256.Sum256(blobs[i]) != best {
@@ -99,7 +101,13 @@ func (p *Pool) ReadConfig(ctx context.Context, key string) ([]byte, error) {
 var (
 	repairMu sync.Mutex
 	repairIP = map[string]bool{}
+	repairWG sync.WaitGroup
 )
+
+// WaitConfigRepair blocks until every in-flight config read-repair goroutine
+// has finished writing. Exposed for tests and orderly shutdown so async disk
+// writes don't outlive the caller.
+func WaitConfigRepair() { repairWG.Wait() }
 
 func repairGate(key string) bool {
 	repairMu.Lock()

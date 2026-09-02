@@ -15,6 +15,7 @@ import (
 
 	"github.com/lojadopocket/gostore/internal/bucketcfg"
 	"github.com/lojadopocket/gostore/internal/logger"
+	"github.com/lojadopocket/gostore/internal/metrics"
 	"github.com/lojadopocket/gostore/internal/object"
 )
 
@@ -183,7 +184,9 @@ func (s *Scanner) walkBucket(ctx context.Context, bucket string, rules []expRule
 			bu.Objects++
 			bu.Bytes += o.Size
 			if s.healer != nil && s.shouldHeal(bucket, o.Name) {
-				if err := s.healer.HealObject(ctx, bucket, o.Name); err == nil {
+				err := s.healer.HealObject(ctx, bucket, o.Name)
+				metrics.HealResult(err == nil)
+				if err == nil {
 					rep.ObjectsHealed++
 				} else {
 					rep.Errors++

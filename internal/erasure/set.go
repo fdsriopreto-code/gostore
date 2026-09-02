@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"path"
 	"sort"
@@ -14,8 +15,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/lojadopocket/gostore/internal/logger"
+	"github.com/lojadopocket/gostore/internal/metrics"
 	"github.com/lojadopocket/gostore/internal/sse"
-
 	"github.com/lojadopocket/gostore/internal/storage"
 )
 
@@ -556,7 +558,14 @@ func (s *Set) getObjectMeta(ctx context.Context, bucket, key string, meta *XLMet
 		if off >= end {
 			return nil
 		}
-		_, werr := w.Write(meta.Inline[off:end])
+		body := meta.Inline[off:end]
+		if off == 0 && int64(len(body)) == meta.Size && verifiableETag(meta.SSE, meta.ETag) {
+			if got := fmt.Sprintf("%x", md5.Sum(body)); got != meta.ETag {
+				integrityFailed(bucket, key, 0, meta.ETag, got)
+				return ErrObjectMismatch
+			}
+		}
+		_, werr := w.Write(body)
 		return werr
 	}
 
@@ -613,6 +622,16 @@ func (s *Set) readPart(ctx context.Context, bucket, key string, meta *XLMeta, pm
 	intraSkip := *skip - firstStripe*stripeLen
 	partRemaining := pm.Size - firstStripe*stripeLen
 	stripeIdx := int(firstStripe)
+
+	// End-to-end integrity: when this call emits the whole part (full-object
+	// GET, not a Range, not SSE), md5 the assembled plaintext and compare to
+	// the part ETag. This catches shard-assembly / decode bugs that the
+	// per-block bitrot hashes cannot — every data block can be individually
+	// intact yet reassembled wrong.
+	var vh hash.Hash
+	if *skip == 0 && *remaining >= pm.Size && verifiableETag(meta.SSE, pm.ETag) {
+		vh = md5.New()
+	}
 
 	for partRemaining > 0 && *remaining > 0 {
 		thisStripeLogical := stripeLen
@@ -682,12 +701,45 @@ func (s *Set) readPart(ctx context.Context, bucket, key string, meta *XLMeta, pm
 			if _, err := w.Write(data); err != nil {
 				return err
 			}
+			if vh != nil {
+				vh.Write(data)
+			}
 			*remaining -= int64(len(data))
 		}
 		partRemaining -= thisStripeLogical
 		stripeIdx++
 	}
+
+	if vh != nil && partRemaining <= 0 {
+		if got := hex.EncodeToString(vh.Sum(nil)); got != pm.ETag {
+			integrityFailed(bucket, key, pm.Number, pm.ETag, got)
+			return ErrObjectMismatch
+		}
+	}
 	return nil
+}
+
+// verifiableETag reports whether etag is a plain md5 hex string we can check
+// the assembled plaintext against. SSE objects store ciphertext on disk and
+// multipart composite ETags ("<md5>-<n>") are not a single md5, so both are
+// skipped.
+func verifiableETag(sseAlgo, etag string) bool {
+	if sseAlgo != "" || len(etag) != 32 {
+		return false
+	}
+	for i := 0; i < len(etag); i++ {
+		c := etag[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func integrityFailed(bucket, key string, part int, want, got string) {
+	metrics.IntegrityFailure()
+	logger.Error("erasure: assembled object failed end-to-end checksum verification",
+		"bucket", bucket, "key", key, "part", part, "wantETag", want, "gotETag", got)
 }
 
 // openShards opens every disk's shard file for a part at the given byte

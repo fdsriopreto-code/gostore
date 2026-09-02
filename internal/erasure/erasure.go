@@ -21,10 +21,11 @@ import (
 
 // Errors surfaced by the erasure layer (mapped to object.Err* by pool.go).
 var (
-	ErrReadQuorum  = errors.New("erasure: read quorum not met")
-	ErrWriteQuorum = errors.New("erasure: write quorum not met")
-	ErrBitrot      = errors.New("erasure: shard failed bitrot check")
-	ErrCorrupt     = errors.New("erasure: object metadata corrupt or inconsistent")
+	ErrReadQuorum     = errors.New("erasure: read quorum not met")
+	ErrWriteQuorum    = errors.New("erasure: write quorum not met")
+	ErrBitrot         = errors.New("erasure: shard failed bitrot check")
+	ErrCorrupt        = errors.New("erasure: object metadata corrupt or inconsistent")
+	ErrObjectMismatch = errors.New("erasure: assembled object failed checksum verification")
 )
 
 // Disk is the subset of per-disk operations the erasure layer needs. It is

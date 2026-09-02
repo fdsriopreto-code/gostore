@@ -1078,7 +1078,8 @@ async function viewMonitoring(v) {
   }
   v.append(el("p", { class: "muted small", style: "margin-top:14px" },
     "Prometheus metrics: ", el("code", {}, location.origin + "/gostore/metrics"),
-    " (open by default; set ", el("code", {}, "GOSTORE_METRICS_TOKEN"), " to require a bearer token)."));
+    " (open by default; set ", el("code", {}, "GOSTORE_METRICS_TOKEN"), " to require a bearer token). ",
+    "Includes ", el("code", {}, "gostore_integrity_failures_total"), " — objects that failed end-to-end checksum verification on read; a non-zero value means shard corruption slipped past bitrot checks and should be investigated."));
 
   // Live request feed — no external audit sink needed.
   v.append(el("h3", { style: "margin:26px 0 8px;font-size:15px" }, "Recent requests"));

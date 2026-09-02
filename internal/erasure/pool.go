@@ -87,6 +87,7 @@ func (p *Pool) Shutdown(ctx context.Context) error {
 	if p.mrf != nil {
 		p.mrf.flush(ctx) // persist any pending self-heal work
 	}
+	WaitConfigRepair() // let async config read-repairs finish their disk writes
 	return nil
 }
 
@@ -485,7 +486,7 @@ func mapErr(err error) error {
 		return object.ErrReadQuorum
 	case errors.Is(err, ErrWriteQuorum):
 		return object.ErrWriteQuorum
-	case errors.Is(err, ErrBitrot), errors.Is(err, ErrCorrupt):
+	case errors.Is(err, ErrBitrot), errors.Is(err, ErrCorrupt), errors.Is(err, ErrObjectMismatch):
 		return object.ErrCorruptedData
 	default:
 		return err

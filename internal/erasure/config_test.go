@@ -57,6 +57,10 @@ func TestConfigStoreMajorityWins(t *testing.T) {
 	if string(got) != "v2" {
 		t.Fatalf("majority-wins failed: got %s", got)
 	}
+	// The read triggers an async read-repair of the 2 stale disks; join it
+	// before the test's TempDir cleanup runs (Windows won't remove a dir with
+	// an open write handle).
+	WaitConfigRepair()
 }
 
 func TestBucketExistenceCache(t *testing.T) {
