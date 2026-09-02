@@ -219,6 +219,7 @@ const NAV = [
     { id: "buckets", title: "Buckets", icon: ICON.bucket },
     { id: "keys", title: "Access Keys", icon: ICON.key },
     { id: "monitoring", title: "Monitoring", icon: ICON.gauge },
+    { id: "docs", title: "Documentation", icon: ICON.book },
   ]},
 ];
 let SERVER = {}; // filled from admin/v1/info
@@ -232,20 +233,17 @@ function renderNav() {
   for (const g of NAV) {
     if (g.group) box.append(el("div", { class: "grp" }, g.group));
     for (const it of g.items) {
-      const a = el("a", { class: (cur === it.id || (it.id !== "dashboard" && cur.startsWith(it.id)) ? "active" : "") },
-        ic(it.icon), it.title);
+      const on = it.id === "dashboard" ? cur === "dashboard"
+        : it.id === "docs" ? cur.startsWith("docs")
+        : cur === it.id || cur.startsWith(it.id + "/");
+      const a = el("a", { class: on ? "active" : "" }, ic(it.icon), it.title);
       a.onclick = () => go(it.id);
       box.append(a);
     }
   }
-  box.append(el("div", { class: "grp" }, "Documentation"));
-  const dcur = cur.startsWith("docs/") ? cur.slice(5) : "";
-  for (const d of DOCS) {
-    const a = el("a", { class: (dcur === d.id ? "active" : "") }, ic(d.icon || ICON.book), d.title);
-    a.onclick = () => go("docs/" + d.id);
-    box.append(a);
-  }
 }
+
+const DOC_GROUPS = ["Get started", "Access control", "Data management", "Reference", "Operations"];
 
 async function render() {
   renderNav();
@@ -260,8 +258,8 @@ async function render() {
     else if (r.startsWith("buckets/")) await viewBucket(v, decodeURIComponent(r.slice(8)));
     else if (r === "keys") await viewKeys(v);
     else if (r === "monitoring") await viewMonitoring(v);
-    else if (r.startsWith("docs/")) viewDoc(v, r.slice(5));
-    else viewDoc(v, "getting-started");
+    else if (r === "docs" || r.startsWith("docs/")) viewDocs(v, r.startsWith("docs/") ? r.slice(5) : DOCS[0].id);
+    else viewDocs(v, DOCS[0].id);
   } catch (e) {
     v.innerHTML = "";
     v.append(el("div", { class: "empty" }, ic(ICON.info), el("h3", {}, "Something went wrong"), el("div", { class: "muted" }, e.message)));
@@ -642,18 +640,39 @@ async function viewMonitoring(v) {
 }
 
 /* ============================ docs ============================ */
-function viewDoc(v, id) {
+function viewDocs(v, id) {
   const d = DOCS.find((x) => x.id === id) || DOCS[0];
-  v.innerHTML = ""; v.className = "wrap docs";
+  v.innerHTML = ""; v.className = "wrap";
+  pageHeader(v, "Documentation", "Everything you need to connect to and operate gostore.");
+
+  const shell = el("div", { class: "docs-shell" });
+  const toc = el("div", { class: "docs-toc" });
+  for (const grp of DOC_GROUPS) {
+    const items = DOCS.filter((x) => x.group === grp);
+    if (!items.length) continue;
+    toc.append(el("div", { class: "grp" }, grp));
+    for (const it of items) {
+      const a = el("a", { class: it.id === d.id ? "active" : "" }, it.title);
+      a.onclick = () => go("docs/" + it.id);
+      toc.append(a);
+    }
+  }
+  const content = el("div", { class: "docs-content" });
   const prose = el("div", { class: "prose" });
   prose.append(el("h2", {}, d.title));
   d.body(prose, { origin: location.origin, region: SERVER.region || REGION, ak: session.ak });
-  v.append(prose);
+  content.append(prose);
+
+  // prev / next within the doc order
   const idx = DOCS.indexOf(d);
-  const nav = el("div", { class: "toolbar", style: "justify-content:space-between;margin-top:40px;border-top:1px solid var(--border);padding-top:18px" });
-  nav.append(idx > 0 ? el("button", { class: "ghost", onclick: () => go("docs/" + DOCS[idx - 1].id) }, "← " + DOCS[idx - 1].title) : el("span"));
-  nav.append(idx < DOCS.length - 1 ? el("button", { class: "ghost", onclick: () => go("docs/" + DOCS[idx + 1].id) }, DOCS[idx + 1].title + " →") : el("span"));
-  v.append(nav);
+  const foot = el("div", { class: "toolbar", style: "justify-content:space-between;margin-top:44px;border-top:1px solid var(--border);padding-top:18px" });
+  foot.append(idx > 0 ? el("button", { class: "ghost", onclick: () => go("docs/" + DOCS[idx - 1].id) }, "← " + DOCS[idx - 1].title) : el("span"));
+  foot.append(idx < DOCS.length - 1 ? el("button", { class: "ghost", onclick: () => go("docs/" + DOCS[idx + 1].id) }, DOCS[idx + 1].title + " →") : el("span"));
+  content.append(foot);
+
+  shell.append(toc, content);
+  v.append(shell);
+  content.scrollIntoView({ block: "nearest" });
 }
 const P = (t) => el("p", {}, t);
 const UL = (...items) => { const u = el("ul"); items.forEach((i) => u.append(el("li", { html: i }))); return u; };
@@ -664,7 +683,7 @@ function TBL(head, rows) {
 }
 
 const DOCS = [
-  { id: "getting-started", icon: ICON.book, title: "Getting started", body: (c, x) => {
+  { id: "getting-started", group: "Get started", icon: ICON.book, title: "Getting started", body: (c, x) => {
     c.append(P("gostore is an S3-compatible object storage server. Anything that speaks the Amazon S3 API — the AWS CLI, the AWS SDKs, MinIO's mc, s3fs, rclone, Cyberduck — works against it. This console is served by the same process as the API."));
     c.append(el("h3", {}, "1. Your endpoint & credentials"));
     c.append(TBL(["Setting", "Value"], [
@@ -694,7 +713,7 @@ aws --endpoint-url ${x.origin} s3 cp s3://my-bucket/hello.txt -`, "bash", "shell
     ));
   }},
 
-  { id: "connect", icon: ICON.code, title: "Connect an SDK", body: (c, x) => {
+  { id: "connect", group: "Get started", icon: ICON.code, title: "Connect an SDK", body: (c, x) => {
     c.append(P("The pattern is always the same: point the S3 client at a custom endpoint, force path-style addressing, and use SigV4 with your access/secret key. Pick your language."));
 
     c.append(el("h3", {}, "AWS CLI"));
@@ -778,7 +797,7 @@ mc cat gs/my-bucket/file.zip | sha256sum`, "bash", "shell"));
 rclone copy ./data gs:my-bucket/data`, "bash", "shell"));
   }},
 
-  { id: "presigned", icon: ICON.link, title: "Presigned URLs", body: (c, x) => {
+  { id: "presigned", group: "Get started", icon: ICON.link, title: "Presigned URLs", body: (c, x) => {
     c.append(P("A presigned URL embeds a time-limited SigV4 signature in the query string, so anyone can GET (or PUT) that one object without credentials. gostore verifies the signature and the expiry."));
     c.append(el("h3", {}, "From the console"));
     c.append(P("Open any object → <b>Share</b> tab → choose an expiry → <b>Generate link</b>. Max 7 days."));
@@ -794,7 +813,7 @@ const putUrl = await getSignedUrl(s3, new PutObjectCommand({ Bucket: "b", Key: "
     c.append(callout("How it verifies", "gostore checks <code>X-Amz-Algorithm=AWS4-HMAC-SHA256</code>, recomputes the signature over the canonical request with <code>UNSIGNED-PAYLOAD</code> and <code>SignedHeaders=host</code>, and rejects the request once <code>X-Amz-Date + X-Amz-Expires</code> has passed.", ""));
   }},
 
-  { id: "operations", icon: ICON.layers, title: "Supported operations", body: (c) => {
+  { id: "operations", group: "Reference", icon: ICON.layers, title: "Supported operations", body: (c) => {
     c.append(P("The S3 API surface gostore implements. Anything not listed returns <code>NotImplemented</code> or is accepted-and-ignored."));
     c.append(el("h3", {}, "Service & bucket"));
     c.append(TBL(["Operation", "Notes"], [
@@ -823,7 +842,7 @@ const putUrl = await getSignedUrl(s3, new PutObjectCommand({ Bucket: "b", Key: "
     ]));
   }},
 
-  { id: "iam", icon: ICON.shield, title: "IAM & policies", body: (c, x) => {
+  { id: "iam", group: "Access control", icon: ICON.shield, title: "IAM & policies", body: (c, x) => {
     c.append(P("gostore has its own identity system: a root credential (from <code>GOSTORE_ROOT_USER/PASSWORD</code>), named users, and service accounts. State is JSON replicated across the volumes — no external database."));
     c.append(el("h3", {}, "Users & service accounts"));
     c.append(UL(
@@ -868,7 +887,7 @@ curl -s -X PUT "${x.origin}/gostore/admin/v1/users" \\
   --duration-seconds 3600`, "bash", "shell"));
   }},
 
-  { id: "versioning", icon: ICON.layers, title: "Versioning", body: (c, x) => {
+  { id: "versioning", group: "Data management", icon: ICON.layers, title: "Versioning", body: (c, x) => {
     c.append(P("When a bucket is versioned, every PUT keeps the previous version and a DELETE (without a version id) just writes a <i>delete marker</i>. Nothing is lost until you delete a specific version."));
     c.append(el("h3", {}, "Enable it"));
     c.append(codeBlock(
@@ -897,7 +916,7 @@ aws --endpoint-url ${x.origin} s3api delete-object \\
     ));
   }},
 
-  { id: "object-lock", icon: ICON.lock, title: "Object Lock (WORM)", body: (c, x) => {
+  { id: "object-lock", group: "Data management", icon: ICON.lock, title: "Object Lock (WORM)", body: (c, x) => {
     c.append(P("Object Lock protects individual object <i>versions</i> from deletion or overwrite for a period of time (retention) or indefinitely (legal hold). It requires versioning and must be turned on at bucket creation."));
     c.append(el("h3", {}, "Create a locked bucket"));
     c.append(codeBlock(
@@ -922,7 +941,7 @@ aws --endpoint-url ${x.origin} s3api put-object-legal-hold \\
     c.append(callout("Erasure backend", "Object Lock works on both backends. COMPLIANCE retention can be extended but never shortened or removed.", "tip"));
   }},
 
-  { id: "lifecycle", icon: ICON.clock, title: "Lifecycle (ILM)", body: (c, x) => {
+  { id: "lifecycle", group: "Data management", icon: ICON.clock, title: "Lifecycle (ILM)", body: (c, x) => {
     c.append(P("Lifecycle rules expire objects automatically. A background scanner (hourly by default, <code>GOSTORE_SCAN_INTERVAL</code>) walks each bucket and applies its enabled rules. You can also trigger a pass from Monitoring → <i>Run lifecycle scan</i>."));
     c.append(el("h3", {}, "Rule types"));
     c.append(UL(
@@ -951,7 +970,7 @@ aws --endpoint-url ${x.origin} s3api put-object-legal-hold \\
     c.append(callout("Object-locked objects", "The scanner skips any object version that is protected by retention or legal hold.", ""));
   }},
 
-  { id: "replication", icon: ICON.branch, title: "Replication", body: (c, x) => {
+  { id: "replication", group: "Data management", icon: ICON.branch, title: "Replication", body: (c, x) => {
     c.append(P("Replication asynchronously copies object writes and deletes to a destination — another bucket on this server, or a remote S3-compatible endpoint (signed with its own credentials). Best-effort: 3 retries, then logged."));
     c.append(el("h3", {}, "Configure (native JSON)"));
     c.append(codeBlock(
@@ -982,7 +1001,7 @@ aws --endpoint-url ${x.origin} s3api put-object-legal-hold \\
     c.append(callout("Secrets", "<code>GET ?replication</code> masks <code>destSecretKey</code> as <code>***</code>; re-saving with <code>***</code> keeps the stored value. There is no persistent retry queue yet.", "warn"));
   }},
 
-  { id: "encryption", icon: ICON.lock, title: "Encryption at rest (SSE-S3)", body: (c, x) => {
+  { id: "encryption", group: "Data management", icon: ICON.lock, title: "Encryption at rest (SSE-S3)", body: (c, x) => {
     c.append(P("Send <code>x-amz-server-side-encryption: AES256</code> on a PUT and gostore stores the object encrypted: a per-object AES-256 data key, wrapped by a local master key, encrypting the bytes in 64 KiB AES-GCM chunks. GET / HEAD / Range decrypt transparently."));
     c.append(codeBlock(
 `aws --endpoint-url ${x.origin} s3api put-object \\
@@ -998,7 +1017,7 @@ new PutObjectCommand({ Bucket: "b", Key: "k", Body: buf, ServerSideEncryption: "
     ));
   }},
 
-  { id: "admin-api", icon: ICON.term, title: "Admin API", body: (c, x) => {
+  { id: "admin-api", group: "Reference", icon: ICON.term, title: "Admin API", body: (c, x) => {
     c.append(P("A native JSON admin API under <code>/gostore/admin/v1/</code>. Every call is SigV4-signed and requires the <code>admin:*</code> permission (the <code>consoleAdmin</code> policy, or root). This console uses it."));
     c.append(TBL(["Method & path", "Body / query", "Purpose"], [
       ["GET /gostore/admin/v1/info", "—", "mode, drives, capacity, counts"],
@@ -1026,7 +1045,7 @@ curl ${x.origin}/gostore/health/ready      # storage has quorum
 curl ${x.origin}/gostore/health/selftest   # full write/read/verify/delete round-trip`, "bash", "shell"));
   }},
 
-  { id: "cluster", icon: ICON.branch, title: "Multi-node cluster", body: (c, x) => {
+  { id: "cluster", group: "Operations", icon: ICON.branch, title: "Multi-node cluster", body: (c, x) => {
     c.append(P("gostore can spread one erasure set across several nodes. Each node runs the same binary; disks from every node form a single pool. A namespace write-lock needs a quorum (N/2+1) of nodes to grant it."));
     c.append(el("h3", {}, "Start each node"));
     c.append(codeBlock(
@@ -1048,7 +1067,7 @@ GOSTORE_CLUSTER_SELF=http://node2:9000 gostore server \\
     c.append(callout("Current limits", "Membership is static (restart every node with the same topology). Per-node IAM / bucket config isn't shared across the cluster yet — apply user/policy changes on every node, or mount a shared config volume. No automatic rebalancing when adding nodes.", "warn"));
   }},
 
-  { id: "limits", icon: ICON.info, title: "Limits & compatibility", body: (c) => {
+  { id: "limits", group: "Operations", icon: ICON.info, title: "Limits & compatibility", body: (c) => {
     c.append(P("gostore targets functional parity with MinIO for single-node deployments. Known gaps:"));
     c.append(UL(
       "<b>SSE-KMS / SSE-C</b> — only SSE-S3. Multipart SSE on the erasure backend: single-part only.",
