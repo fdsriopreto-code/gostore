@@ -19,6 +19,7 @@ type Pool struct {
 	sets   []*Set
 	kms    kmsWrapper
 	locker func(bucket string, objects ...string) object.RWLocker
+	mrf    *mrfQueue
 
 	nsMu   sync.Mutex
 	nsLock map[string]*sync.RWMutex

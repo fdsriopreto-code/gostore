@@ -257,6 +257,18 @@ func serve(cfg config.Config, obj object.Layer, clusterRPC http.Handler) error {
 	bcfg.StartRefresh(refreshCtx, 30*time.Second)
 	bus := event.New(bcfg)
 
+	// MRF: background re-heal of objects that committed on a quorum but not
+	// every disk (erasure backend only).
+	if pool, ok := obj.(*erasure.Pool); ok {
+		if v := os.Getenv("GOSTORE_MRF_INTERVAL"); v != "" {
+			if d, perr := time.ParseDuration(v); perr == nil {
+				erasure.SetMRFInterval(d)
+			}
+		}
+		pool.EnableMRF(cb)
+		pool.StartMRF(refreshCtx)
+	}
+
 	scanInterval := time.Hour
 	if v := os.Getenv("GOSTORE_SCAN_INTERVAL"); v != "" {
 		if d, perr := time.ParseDuration(v); perr == nil && d > 0 {

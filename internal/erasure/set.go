@@ -26,6 +26,10 @@ type Set struct {
 	ec           *Erasure
 	dataBlocks   int
 	parityBlocks int
+
+	// mrf, if set, is called when a write commits on a quorum but not on
+	// every disk, so a background worker can re-heal the object.
+	mrf func(bucket, key string)
 }
 
 // NewSet builds a set from n disks (n even, >= 4). Parity defaults to n/2.
@@ -223,15 +227,19 @@ func (s *Set) putObjectSSE(ctx context.Context, bucket, key string, parts []part
 
 	var total int64
 	partMD5Raw := make([]byte, 0, len(parts)*16)
+	shardsPartial := false
 
 	for _, ps := range parts {
 		reader := ps.Reader
 		if sp != nil {
 			reader = sp.wrapForEncrypt(reader)
 		}
-		checks, ctMD5, written, err := s.encodePart(ctx, staging, ps.Number, dist, reader)
+		checks, ctMD5, written, full, err := s.encodePart(ctx, staging, ps.Number, dist, reader)
 		if err != nil {
 			return nil, err
+		}
+		if !full {
+			shardsPartial = true
 		}
 		partETag := ctMD5
 		if sp != nil {
@@ -262,7 +270,11 @@ func (s *Set) putObjectSSE(ctx context.Context, bucket, key string, parts []part
 		meta.NoncePrefix = hex.EncodeToString(sp.prefix)
 	}
 
-	return s.commitMeta(ctx, staging, bucket, key, meta)
+	m, err := s.commitMeta(ctx, staging, bucket, key, meta)
+	if err == nil && shardsPartial && s.mrf != nil && bucket != "" {
+		s.mrf(bucket, key)
+	}
+	return m, err
 }
 
 // putObjectInline buffers a single small part into meta.Inline and commits
@@ -324,9 +336,14 @@ func (s *Set) commitMeta(ctx context.Context, staging, bucket, key string, meta 
 	commitErrs := s.forEachDisk(func(d Disk) error {
 		return d.RenameDir(ctx, "", staging, bucket, key)
 	})
-	if okCount(commitErrs) < s.writeQuorum() {
+	committed := okCount(commitErrs)
+	if committed < s.writeQuorum() {
 		_ = s.forEachDisk(func(d Disk) error { return d.Delete(ctx, bucket, key, true) })
 		return nil, ErrWriteQuorum
+	}
+	// Quorum met but not every disk took the write: queue a background heal.
+	if committed < s.n() && s.mrf != nil && bucket != "" {
+		s.mrf(bucket, key)
 	}
 	return meta, nil
 }
@@ -335,7 +352,7 @@ func (s *Set) commitMeta(ctx context.Context, staging, bucket, key string, meta 
 // file per disk under staging, and records a per-stripe per-disk bitrot
 // checksum. Returns checksums[stripe][diskIndex], the md5 of the plaintext,
 // and the number of plaintext bytes consumed.
-func (s *Set) encodePart(ctx context.Context, staging string, partNum int, dist []int, r io.Reader) ([][]string, string, int64, error) {
+func (s *Set) encodePart(ctx context.Context, staging string, partNum int, dist []int, r io.Reader) ([][]string, string, int64, bool, error) {
 	n := s.n()
 	pipes := make([]*io.PipeWriter, n)
 	errCh := make(chan error, n)
@@ -407,7 +424,7 @@ func (s *Set) encodePart(ctx context.Context, staging string, partNum int, dist 
 	close(errCh)
 
 	if encErr != nil {
-		return nil, "", 0, encErr
+		return nil, "", 0, false, encErr
 	}
 	writeOK := 0
 	for e := range errCh {
@@ -416,9 +433,9 @@ func (s *Set) encodePart(ctx context.Context, staging string, partNum int, dist 
 		}
 	}
 	if writeOK < s.writeQuorum() {
-		return nil, "", 0, ErrWriteQuorum
+		return nil, "", 0, false, ErrWriteQuorum
 	}
-	return checksums, hex.EncodeToString(plainMD5.Sum(nil)), total, nil
+	return checksums, hex.EncodeToString(plainMD5.Sum(nil)), total, writeOK == n, nil
 }
 
 // ---------------------------------------------------------------------------
