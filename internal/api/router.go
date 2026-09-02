@@ -26,6 +26,7 @@ type Server struct {
 	bus  *event.Bus
 	repl *replication.Manager
 	scan *scanner.Scanner
+	rl   *rateLimiter
 
 	domainNames []string
 }
@@ -42,6 +43,7 @@ func NewServer(cfg config.Config, obj object.Layer, im *iam.Manager, bc *bucketc
 		cfg: cfg, obj: obj, iam: im, bcfg: bc, bus: bus,
 		repl: replication.New(bc, obj),
 		scan: scan,
+		rl:   newRateLimiter(),
 	}
 	if v := strings.TrimSpace(os.Getenv("GOSTORE_DOMAIN")); v != "" {
 		for _, d := range strings.Split(v, ",") {
@@ -124,6 +126,18 @@ func (s *Server) handleS3(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(context.WithValue(r.Context(), ctxKeyAccessKey{}, accessKey))
 	if sr, ok := w.(*statusRecorder); ok {
 		sr.accessKey = accessKey
+	}
+
+	if s.rl != nil {
+		rlKey := accessKey
+		if rlKey == "" {
+			rlKey = "anon:" + clientIP(r)
+		}
+		if !s.rl.allow(rlKey) {
+			w.Header().Set("Retry-After", "1")
+			writeErrorResponse(w, r, ErrSlowDown, r.URL.Path)
+			return
+		}
 	}
 
 	// STS AssumeRole is allowed for any authenticated caller, ahead of authz.

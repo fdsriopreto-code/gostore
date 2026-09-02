@@ -24,6 +24,12 @@ var (
 	bytesIn  atomic.Uint64
 	bytesOut atomic.Uint64
 
+	// request-duration histogram (seconds), fixed buckets.
+	durBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
+	durCounts  = make([]uint64, len(durBuckets)+1) // last = +Inf
+	durSum     float64
+	durN       uint64
+
 	version = "dev"
 )
 
@@ -36,13 +42,22 @@ type reqKey struct {
 func SetVersion(v string) { version = v }
 
 // Record accounts one finished HTTP request.
-func Record(method string, status int, inBytes, outBytes int64) {
+func Record(method string, status int, inBytes, outBytes int64, seconds float64) {
 	if status <= 0 {
 		status = 200
 	}
 	k := reqKey{method: method, class: strconv.Itoa(status/100) + "xx"}
 	mu.Lock()
 	reqTotal[k]++
+	i := 0
+	for ; i < len(durBuckets); i++ {
+		if seconds <= durBuckets[i] {
+			break
+		}
+	}
+	durCounts[i]++
+	durSum += seconds
+	durN++
 	mu.Unlock()
 	if inBytes > 0 {
 		bytesIn.Add(uint64(inBytes))
@@ -115,6 +130,19 @@ func WritePrometheus(w io.Writer, g Gauges) {
 	line(fmt.Sprintf("gostore_http_request_bytes_total %d", bytesIn.Load()))
 	help("gostore_http_response_bytes_total", "counter", "Total response body bytes sent.")
 	line(fmt.Sprintf("gostore_http_response_bytes_total %d", bytesOut.Load()))
+
+	help("gostore_http_request_duration_seconds", "histogram", "Request latency.")
+	mu.Lock()
+	var cum uint64
+	for i, ub := range durBuckets {
+		cum += durCounts[i]
+		line(fmt.Sprintf("gostore_http_request_duration_seconds_bucket{le=%q} %d", strconv.FormatFloat(ub, 'g', -1, 64), cum))
+	}
+	cum += durCounts[len(durBuckets)]
+	line(fmt.Sprintf("gostore_http_request_duration_seconds_bucket{le=\"+Inf\"} %d", cum))
+	line(fmt.Sprintf("gostore_http_request_duration_seconds_sum %s", strconv.FormatFloat(durSum, 'g', -1, 64)))
+	line(fmt.Sprintf("gostore_http_request_duration_seconds_count %d", durN))
+	mu.Unlock()
 
 	help("gostore_disks", "gauge", "Disk counts by state.")
 	line(fmt.Sprintf("gostore_disks{state=\"total\"} %d", g.DisksTotal))

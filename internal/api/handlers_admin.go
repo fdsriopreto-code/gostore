@@ -11,6 +11,7 @@ import (
 	"github.com/lojadopocket/gostore/internal/erasure"
 	"github.com/lojadopocket/gostore/internal/iam"
 	"github.com/lojadopocket/gostore/internal/iam/policy"
+	"github.com/lojadopocket/gostore/internal/object"
 	"github.com/lojadopocket/gostore/internal/storage"
 )
 
@@ -62,6 +63,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		s.handleActivity(w, r)
 	case path == "users/rotate-secret" && r.Method == http.MethodPost:
 		s.adminRotateSecret(w, r)
+	case path == "buckets/empty" && r.Method == http.MethodPost:
+		s.adminEmptyBucket(w, r)
 	case path == "pool" && r.Method == http.MethodGet:
 		s.adminPoolStatus(w)
 	case path == "pool/decommission" && r.Method == http.MethodPost:
@@ -252,6 +255,48 @@ func (s *Server) adminRotateSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"accessKey": body.AccessKey, "secretKey": body.SecretKey})
+}
+
+// adminEmptyBucket deletes every object in a bucket (all versions) without
+// deleting the bucket itself. MinIO makes you clear objects first by hand.
+func (s *Server) adminEmptyBucket(w http.ResponseWriter, r *http.Request) {
+	bucket := r.URL.Query().Get("bucket")
+	if bucket == "" {
+		writeJSONError(w, http.StatusBadRequest, "bucket query param required")
+		return
+	}
+	ctx := r.Context()
+	deleted := 0
+	token := ""
+	for {
+		li, err := s.obj.ListObjectsV2(ctx, bucket, "", token, "", 1000, false, "")
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if len(li.Objects) == 0 {
+			break
+		}
+		batch := make([]object.ObjectToDelete, 0, len(li.Objects))
+		for _, o := range li.Objects {
+			batch = append(batch, object.ObjectToDelete{ObjectName: o.Name})
+		}
+		dr, _ := s.obj.DeleteObjects(ctx, bucket, batch, object.ObjectOptions{})
+		deleted += len(dr)
+		if !li.IsTruncated {
+			break
+		}
+		token = li.NextContinuationToken
+	}
+	// also sweep version logs / delete markers
+	lv, _ := s.obj.ListObjectVersions(ctx, bucket, "", "", "", "", 1000)
+	for _, o := range lv.Objects {
+		if o.VersionID != "" && o.VersionID != "null" {
+			_, _ = s.obj.DeleteObject(ctx, bucket, o.Name, object.ObjectOptions{VersionID: o.VersionID})
+			deleted++
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"bucket": bucket, "deleted": deleted})
 }
 
 // adminWhoami reports the caller's own identity + effective policies.

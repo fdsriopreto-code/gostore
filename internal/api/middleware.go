@@ -96,7 +96,7 @@ func withAccessLog(next http.Handler) http.Handler {
 		if inBytes < 0 {
 			inBytes = 0
 		}
-		metrics.Record(r.Method, rec.status, inBytes, int64(rec.bytes))
+		metrics.Record(r.Method, rec.status, inBytes, int64(rec.bytes), dur.Seconds())
 		if !isInternalPath(r.URL.Path) {
 			activity.add(activityEntry{
 				Time: start.UTC(), Method: r.Method, Path: r.URL.Path,

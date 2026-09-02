@@ -931,3 +931,44 @@ func TestRotateSecretAndWhoami(t *testing.T) {
 		t.Fatalf("new secret should work, got %d", r.StatusCode)
 	}
 }
+
+func TestRateLimitAndEmptyBucket(t *testing.T) {
+	t.Setenv("GOSTORE_RATE_LIMIT", "5")
+	t.Setenv("GOSTORE_RATE_BURST", "5")
+	srv := newTestServer(t)
+
+	_ = do(t, srv, http.MethodPut, "/ratebk", []byte{}, nil)
+	// burst of 5 is allowed, then 503 SlowDown
+	got503 := false
+	for i := 0; i < 20; i++ {
+		r := do(t, srv, http.MethodGet, "/ratebk", nil, nil)
+		if r.StatusCode == http.StatusServiceUnavailable {
+			got503 = true
+			if b := readBody(t, r); !strings.Contains(b, "SlowDown") {
+				t.Fatalf("503 body: %s", b)
+			}
+			break
+		}
+		r.Body.Close()
+	}
+	if !got503 {
+		t.Fatal("expected a 503 SlowDown after exhausting the burst")
+	}
+
+	// empty-bucket admin op (fresh server so rate limit doesn't bite the admin path — admin isn't rate limited anyway)
+	srv2 := newTestServer(t)
+	_ = do(t, srv2, http.MethodPut, "/emptybk", []byte{}, nil)
+	for i := 0; i < 3; i++ {
+		_ = do(t, srv2, http.MethodPut, fmt.Sprintf("/emptybk/o%d", i), []byte("x"), nil)
+	}
+	r := doAs(t, srv2, testAK, testSK, http.MethodPost, "/gostore/admin/v1/buckets/empty?bucket=emptybk", nil)
+	if r.StatusCode != 200 {
+		t.Fatalf("empty: %d %s", r.StatusCode, readBody(t, r))
+	}
+	li, _ := srv2.Client().Get(srv2.URL + "/emptybk?list-type=2")
+	_ = li
+	lr := do(t, srv2, http.MethodGet, "/emptybk?list-type=2", nil, nil)
+	if b := readBody(t, lr); strings.Contains(b, "<Key>") {
+		t.Fatalf("bucket not empty after empty op: %s", b)
+	}
+}

@@ -132,6 +132,19 @@ async function uploadMultipart(path, file, onProgress) {
     throw e;
   }
 }
+async function presignPut(path, expires = 3600) {
+  const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, "");
+  const ds = amzDate.slice(0, 8), scope = `${ds}/${REGION}/s3/aws4_request`;
+  const q = {
+    "X-Amz-Algorithm": "AWS4-HMAC-SHA256", "X-Amz-Credential": `${session.ak}/${scope}`,
+    "X-Amz-Date": amzDate, "X-Amz-Expires": String(expires), "X-Amz-SignedHeaders": "host",
+  };
+  const cr = ["PUT", encP("/" + path), canonQ(q), "host:" + location.host + "\n", "host", "UNSIGNED-PAYLOAD"].join("\n");
+  const sts = ["AWS4-HMAC-SHA256", amzDate, scope, await sha256hex(cr)].join("\n");
+  q["X-Amz-Signature"] = hx(await hmac(await signingKey(session.sk, ds), sts));
+  return location.origin + encP("/" + path) + "?" + canonQ(q);
+}
+
 async function presignGet(path, expires = 3600, extraQuery = {}) {
   const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, "");
   const ds = amzDate.slice(0, 8), scope = `${ds}/${REGION}/s3/aws4_request`;
@@ -520,6 +533,16 @@ async function bucketObjects(v, b) {
     el("div", { class: "search" }, ic(ICON.search), sInput),
     el("button", { class: "ghost", onclick: render }, ic(ICON.refresh)),
     el("div", { class: "grow" }),
+    el("button", { class: "ghost", onclick: async () => {
+      const k = prompt("Key for the upload link (relative to this folder):", "");
+      if (!k) return;
+      const full = bucketPrefix + k;
+      const url = await presignPut(b + "/" + full, 3600);
+      modal("Upload link — valid 1 hour", "Anyone with this URL can upload to " + b + "/" + full + " with a single PUT.", [
+        { name: "u", label: "Presigned PUT URL", value: url, readonly: true },
+        { name: "c", label: "Example", value: `curl -T ./file '${url}'`, readonly: true },
+      ], async () => {}, "Done");
+    } }, ic(ICON.link), "Upload link"),
     el("button", { class: "ghost", onclick: () => fd.click() }, ic(ICON.folder), "Upload folder"), fd,
     el("button", { class: "primary", onclick: () => fi.click() }, ic(ICON.up), "Upload"), fi);
   v.append(tb);
@@ -911,6 +934,17 @@ async function bucketSettings(v, b) {
   } }, ic(ICON.plus), "Quick: allow browser playback from any origin")));
   await editor("Event notifications", "notification", "application/json",
     JSON.stringify({ webhooks: [{ id: "w1", url: "https://example.com/hook", events: ["s3:ObjectCreated:*"], prefix: "", suffix: "" }] }, null, 2));
+
+  // --- Danger zone ---
+  v.append(el("h3", { style: "margin:28px 0 8px;font-size:15px;color:var(--red,#c0392b)" }, "Danger zone"));
+  v.append(el("div", { class: "toolbar" }, el("button", { class: "danger sm", onclick: async () => {
+    const c = prompt('This deletes EVERY object in "' + b + '" (all versions). Type the bucket name to confirm:');
+    if (c !== b) return;
+    try {
+      const j = await (await must(await api("POST", "/gostore/admin/v1/buckets/empty", { query: { bucket: b } }))).json();
+      toast("Emptied " + b + " (" + j.deleted + " deleted)", "ok"); render();
+    } catch (e) { toast(e.message, "err"); }
+  } }, ic(ICON.trash), "Empty bucket")));
 }
 
 function randHex(bytes) {
@@ -1491,6 +1525,7 @@ new PutObjectCommand({ Bucket: "b", Key: "k", Body: buf, ServerSideEncryption: "
       ["GET /gostore/admin/v1/datausage", "—", "per-bucket object counts &amp; byte totals from the last scan"],
       ["GET /gostore/admin/v1/whoami", "—", "<b>any authenticated key</b>: your identity, effective policies, admin?"],
       ["POST /gostore/admin/v1/users/rotate-secret", "<code>{accessKey, secretKey?}</code>", "give an existing user a fresh secret (old one dies immediately)"],
+      ["POST /gostore/admin/v1/buckets/empty?bucket=X", "—", "delete every object (all versions) without deleting the bucket"],
       ["GET /gostore/admin/v1/activity?limit=N", "—", "last N HTTP requests (method, path, status, key, IP) — no external audit sink needed"],
       ["GET /gostore/admin/v1/pool", "—", "erasure-set layout + any running decommission/rebalance"],
       ["POST /gostore/admin/v1/pool/decommission?set=N", "—", "drain set N onto the others, then it can be removed"],
@@ -1566,6 +1601,7 @@ GOSTORE_CLUSTER_SELF=http://node2:9000 gostore server \\
       ["GOSTORE_LOG_LEVEL / GOSTORE_LOG_JSON", "<code>debug|info|warn|error</code> / <code>1</code> for JSON logs"],
       ["GOSTORE_NO_CONTENT_TYPE_SNIFF", "set to <code>1</code> to stop guessing an object's Content-Type from its key extension when the client sent none / <code>application/octet-stream</code>"],
       ["GOSTORE_METRICS_TOKEN", "when set, <code>GET /gostore/metrics</code> requires <code>Authorization: Bearer &lt;token&gt;</code> (otherwise the endpoint is open)"],
+      ["GOSTORE_RATE_LIMIT / GOSTORE_RATE_BURST", "requests/sec per access key (per IP for anonymous), and bucket size — over the limit gets <code>503 SlowDown</code>. Unset = no limit."],
     ]));
     c.append(el("h3", {}, "Background work & erasure tuning"));
     c.append(TBL(["Variable", "Default", "Purpose"], [
