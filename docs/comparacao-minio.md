@@ -81,6 +81,25 @@ MessagePack em tudo, e ~15 anos de casos extremos acumulados.
 | Roda | a cada ciclo (atraso inicial de 1 min), **bloom filter por caminho** para pular prefixos inalterados | intervalo fixo (`GOSTORE_SCAN_INTERVAL`, padrão 1 h), sempre walk completo |
 | Faz | contabilização de uso de dados, lifecycle/ILM, **heal oportunista**, GC de tier, resync de replicação | só expiração de lifecycle + aborto de multipart velho |
 
+## Estado de implementação
+
+As oito melhorias de maior valor da lista abaixo **já foram implementadas**
+(commits nesta branch). Restam #9 (transporte multiplexado) e #10
+(decommission/rebalance de pool), ambas de esforço alto e baixa prioridade.
+
+| # | Melhoria | Status | Como usar / ajustar |
+|---|---|---|---|
+| 1 | IAM + config de bucket na camada de objetos | ✅ feito | automático; refresh a cada 30 s entre nós |
+| 2 | Bitrot streaming intercalado | ✅ feito | automático em escritas novas; objetos antigos lidos pelo caminho legado |
+| 3 | Objetos pequenos inline no xl.meta | ✅ feito | `GOSTORE_INLINE_MAX` (bytes, padrão 131072; 0 desliga) |
+| 4 | Fila MRF de auto-heal para escritas parciais | ✅ feito | `GOSTORE_MRF_INTERVAL` (duração, padrão 5m) |
+| 5 | Cache de listagem por bucket (metacache-lite) | ✅ feito | `GOSTORE_LIST_CACHE_TTL` (duração, padrão 15s; 0 desliga) |
+| 6 | Retry no dsync + cancelamento por perda de lock | ✅ feito | automático; timeout de aquisição 10 s |
+| 7 | Scanner: contabilização de uso + heal oportunista | ✅ feito | `GET /gostore/admin/v1/datausage`; heal 1-em-128 por passada |
+| 8 | Auto-heal de disco novo / substituído | ✅ feito | automático no boot (backend erasure) |
+| 9 | Transporte multiplexado persistente entre nós | ⏳ pendente | — |
+| 10 | Decommission e rebalance de pool | ⏳ pendente | — |
+
 ## Lista de melhorias (ranqueada)
 
 ### 1. Guardar IAM + config de bucket na camada de objetos — *alto valor, esforço médio*

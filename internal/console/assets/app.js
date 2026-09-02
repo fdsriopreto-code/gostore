@@ -1030,7 +1030,8 @@ new PutObjectCommand({ Bucket: "b", Key: "k", Body: buf, ServerSideEncryption: "
       ["POST /gostore/admin/v1/service-accounts", "<code>{parentUser?,accessKey?,secretKey?,policy?}</code>", "create (returns the secret once)"],
       ["DELETE /gostore/admin/v1/service-accounts?accessKey=", "—", "delete"],
       ["POST /gostore/admin/v1/heal", "—", "reconstruct missing/corrupt shards (erasure)"],
-      ["POST /gostore/admin/v1/scanner/run", "—", "run one lifecycle pass now"],
+      ["POST /gostore/admin/v1/scanner/run", "—", "run one scan pass now (lifecycle + usage + heal sample)"],
+      ["GET /gostore/admin/v1/datausage", "—", "per-bucket object counts &amp; byte totals from the last scan"],
     ]));
     c.append(el("h3", {}, "Example — curl with SigV4"));
     c.append(codeBlock(
@@ -1064,7 +1065,40 @@ GOSTORE_CLUSTER_SELF=http://node2:9000 gostore server \\
       "Inter-node traffic is under <code>/gostore/internal/</code>, authed with a bearer token — run it on a private network or behind mTLS.",
       "Point clients at any node's S3 endpoint.",
     ));
-    c.append(callout("Current limits", "Membership is static (restart every node with the same topology). Per-node IAM / bucket config isn't shared across the cluster yet — apply user/policy changes on every node, or mount a shared config volume. No automatic rebalancing when adding nodes.", "warn"));
+    c.append(el("h3", {}, "What's shared automatically"));
+    c.append(UL(
+      "IAM (users, policies, service accounts) and per-bucket config are stored as objects under <code>.gostore.sys/</code> — erasure-coded across every disk of every node, read back majority-wins — and reloaded on each node every 30s. Create a user on any node; it works on all of them.",
+      "A write that reaches quorum but not every disk is queued for background re-heal (<code>GOSTORE_MRF_INTERVAL</code>, default 5m).",
+      "A replaced or freshly-added disk is detected at startup and repopulated by an automatic heal pass.",
+      "Namespace locks retry with backoff up to 10s; if a lock holder loses quorum mid-operation, its context is cancelled so the write aborts instead of racing.",
+    ));
+    c.append(callout("Current limits", "Membership is static (restart every node with the same topology). No automatic rebalancing when adding nodes, and no multiplexed transport yet (one HTTP round-trip per inter-node disk op).", "warn"));
+  }},
+
+  { id: "config", group: "Operations", icon: ICON.term, title: "Server configuration", body: (c) => {
+    c.append(P("All configuration is environment variables passed to the <code>gostore server</code> process. No config file, no database."));
+    c.append(el("h3", {}, "Core"));
+    c.append(TBL(["Variable", "Purpose"], [
+      ["GOSTORE_ROOT_USER / GOSTORE_ROOT_PASSWORD", "root credential (password &ge; 8 chars)"],
+      ["GOSTORE_REGION", "region reported to clients (default <code>us-east-1</code>)"],
+      ["GOSTORE_ADDRESS / GOSTORE_CONSOLE_ADDRESS", "listen addresses (default <code>:9000</code> / <code>:9001</code>)"],
+      ["GOSTORE_DOMAIN", "comma-list of domains to enable virtual-host-style addressing"],
+      ["GOSTORE_KMS_MASTER_KEY", "base64 of 32 bytes for SSE-S3; auto-generated to <code>.gostore.sys/kms/master.key</code> if unset"],
+      ["GOSTORE_LOG_LEVEL / GOSTORE_LOG_JSON", "<code>debug|info|warn|error</code> / <code>1</code> for JSON logs"],
+    ]));
+    c.append(el("h3", {}, "Background work & erasure tuning"));
+    c.append(TBL(["Variable", "Default", "Purpose"], [
+      ["GOSTORE_SCAN_INTERVAL", "1h", "cadence of the scanner (lifecycle + data-usage + heal sample)"],
+      ["GOSTORE_INLINE_MAX", "131072", "objects up to this many bytes are stored inside xl.meta; <code>0</code> disables"],
+      ["GOSTORE_MRF_INTERVAL", "5m", "cadence of the partial-write re-heal worker"],
+      ["GOSTORE_LIST_CACHE_TTL", "15s", "per-bucket listing cache lifetime; <code>0</code> disables (re-walk every page)"],
+    ]));
+    c.append(el("h3", {}, "Cluster"));
+    c.append(TBL(["Variable", "Purpose"], [
+      ["GOSTORE_CLUSTER_SELF", "this node's own base URL, e.g. <code>http://node1:9000</code>"],
+      ["GOSTORE_CLUSTER_SECRET", "shared bearer token for inter-node RPC — identical on every node"],
+    ]));
+    c.append(callout("Anonymous mode", "<code>GOSTORE_ALLOW_ANONYMOUS=1</code> accepts unsigned requests and skips authorization. Debugging only — never in production.", "warn"));
   }},
 
   { id: "limits", group: "Operations", icon: ICON.info, title: "Limits & compatibility", body: (c) => {
@@ -1074,11 +1108,10 @@ GOSTORE_CLUSTER_SELF=http://node2:9000 gostore server \\
       "<b>IAM groups</b> and <b>OIDC / LDAP</b> STS federation.",
       "<b>Lifecycle</b> storage-class transitions (only expiration).",
       "<b>Replication</b> has no persistent retry queue (best-effort, 3 tries).",
-      "<b>Cluster</b>: static membership, per-node config, no rebalancing.",
+      "<b>Cluster</b>: static membership, no pool rebalancing/decommission, one HTTP round-trip per inter-node disk op (no multiplexed transport).",
       "Virtual-host-style addressing is off by default (set <code>GOSTORE_DOMAIN</code> to enable). SigV2 is not supported — SigV4 only.",
-      "Background proactive healing — <code>heal</code> is on-demand; the scanner only does lifecycle.",
     ));
-    c.append(callout("What definitely works", "Buckets, objects, multipart, range & conditional requests, presigned URLs, versioning, Object Lock, lifecycle expiry, tagging, bucket policies (incl. anonymous), CORS, SSE-S3, event webhooks, replication, IAM users/service-accounts/policies, STS AssumeRole, erasure coding with bitrot protection & heal, and a multi-node cluster.", "tip"));
+    c.append(callout("What definitely works", "Buckets, objects, multipart, range & conditional requests, presigned URLs, versioning, Object Lock, lifecycle expiry, tagging, bucket policies (incl. anonymous), CORS, SSE-S3, event webhooks, replication, IAM users/service-accounts/policies (cluster-wide via the object layer), STS AssumeRole, erasure coding with interleaved-bitrot protection, inline small objects, MRF + scanner + new-disk auto-heal, per-bucket data-usage stats, per-bucket listing cache, and a multi-node cluster.", "tip"));
   }},
 ];
 

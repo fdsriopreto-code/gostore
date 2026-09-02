@@ -66,7 +66,7 @@ volumes.
 | **M4** | Erasure coding | Reed-Solomon sobre N discos locais (N par, ≥4; paridade = N/2), `xl.meta` próprio replicado, bitrot HighwayHash por stripe/shard, quorum de leitura/escrita, reconstrução automática na leitura, multipart erasure-coded | ✅ |
 | **M5** | Server pools | 1 erasure set por argumento do `server`, todos formam 1 pool; placement por hash do nome; listagem faz merge entre sets | ✅ |
 | M6 | Distribuído | disco remoto via RPC, cluster multi-nó, lock distribuído (estilo dsync) | ⏳ **pendente** (precisa de protocolo RPC + consenso; não dá pra apressar com segurança) |
-| **M6** | Distribuído | `internal/cluster`: `RemoteDisk` (erasure.Disk sobre RPC HTTP interno, bearer token), 1 erasure set abrangendo todos os nós, lock por quorum (dsync-lite: N/2+1 nós concedem, TTL + refresh). Args `http://host:port/data/d{1...4}`, `GOSTORE_CLUSTER_SELF` + `GOSTORE_CLUSTER_SECRET`. Membership estático; config IAM/bucket ainda por-nó. | ✅ (lite) |
+| **M6** | Distribuído | `internal/cluster`: `RemoteDisk` (erasure.Disk sobre RPC HTTP interno, bearer token), 1 erasure set abrangendo todos os nós, lock por quorum (dsync-lite: N/2+1 nós concedem, TTL + refresh). Args `http://host:port/data/d{1...4}`, `GOSTORE_CLUSTER_SELF` + `GOSTORE_CLUSTER_SECRET`. Membership estático; config IAM/bucket compartilhada via camada de objetos (`.gostore.sys/`, quorum) + refresh 30 s; lock com retry+backoff e cancelamento por perda de quorum. | ✅ (lite) |
 | **M7** | Healing (lite) | `POST /gostore/admin/v1/heal`: varre e reescreve `xl.meta`/shards perdidos ou corrompidos. Scanner de background faz ILM (heal proativo ainda não). | ✅ (parcial) |
 | **M8** | IAM | usuários, service accounts, engine de policy AWS própria (Effect/Action/NotAction/Resource/Condition, Principal, deny-vence), 5 canned policies, admin API `/gostore/admin/v1/`, estado JSON replicado. Grupos ainda não. | ✅ |
 | **M9** | STS | `AssumeRole` (credenciais temporárias em memória, policy do chamador ∩ policy inline). OIDC/LDAP ainda não. | ✅ (parcial) |
@@ -211,6 +211,18 @@ requests sem assinatura — só debug), `GOSTORE_KMS_MASTER_KEY` (base64 de 32
 bytes; senão é gerada em `.gostore.sys/kms/master.key`), `GOSTORE_SCAN_INTERVAL`
 (ex. `30m`; default `1h`), `GOSTORE_DISABLE_SELFTEST=1`.
 
+Tuning do backend erasure (opcionais):
+`GOSTORE_INLINE_MAX` (bytes; objetos até esse tamanho ficam dentro do
+`xl.meta`; default `131072`, `0` desliga), `GOSTORE_MRF_INTERVAL` (cadência do
+auto-heal de escritas parciais; default `5m`), `GOSTORE_LIST_CACHE_TTL`
+(cache de listagem por bucket; default `15s`, `0` desliga),
+`GOSTORE_CLUSTER_SELF`, `GOSTORE_CLUSTER_SECRET` (modo cluster).
+
+IAM e config de bucket são gravados como objetos em `.gostore.sys/` pela
+camada de armazenamento (replicados em todos os discos/nós, leitura por
+maioria) e recarregados a cada 30 s — um usuário criado num nó aparece nos
+outros sem banco externo.
+
 ## Erasure coding (M4) — como funciona
 
 Cada parte de um objeto é quebrada em *stripes* de `blockSize` (1 MiB) por
@@ -220,9 +232,19 @@ perda de até `N/2` discos.
 
 - `xl.meta` (JSON) é escrito **idêntico em todos os discos** — metadados
   sobrevivem à mesma perda; a versão vencedora é escolhida por maioria.
-- **Bitrot**: hash HighwayHash-256 por stripe por shard, guardado no
-  `xl.meta`. Na leitura, um shard cujo hash não bate é descartado e o
-  Reed-Solomon reconstrói a partir dos bons — inclusive em leitura por range.
+- **Objetos pequenos** (até `GOSTORE_INLINE_MAX`, default 128 KiB) vão
+  *dentro* do `xl.meta` (campo `inline`) — uma operação de arquivo por disco
+  em vez de um shard-file extra.
+- **Bitrot**: hash HighwayHash-256 por bloco de stripe, gravado **intercalado
+  no próprio shard-file** (`[hash|bloco][hash|bloco]…`), então o `xl.meta`
+  tem tamanho constante. Na leitura, um bloco cujo hash não bate é descartado
+  e o Reed-Solomon reconstrói a partir dos bons — inclusive em leitura por
+  range. Objetos escritos por versões antigas (checksums no `xl.meta`) são
+  lidos pelo caminho legado automaticamente.
+- **Auto-heal**: escritas que atingem quorum mas não todos os discos entram
+  numa fila MRF persistente e são re-healadas em segundo plano; o scanner
+  ainda heala 1-em-128 objetos por passada; um disco novo/substituído é
+  detectado no boot e repovoado sozinho.
 - **Quorum**: leitura = `N/2` discos; escrita = `N/2 + 1`.
 - **Multipart**: cada parte é um blob erasure-coded próprio em
   `.gostore.sys/multipart/<uploadId>/`; no `CompleteMultipartUpload` as
