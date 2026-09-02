@@ -255,7 +255,7 @@ func (p *Pool) getVersionedOn(ctx context.Context, set *Set, bucket, key string,
 		}
 		cOff, cLen := cipherRange(off, length, m.Size)
 		pr, pw := io.Pipe()
-		go func() { _ = pw.CloseWithError(set.getObject(ctx, bucket, dir, cOff, cLen, pw)) }()
+		go func() { _ = pw.CloseWithError(set.getObjectMeta(ctx, bucket, dir, m, cOff, cLen, pw)) }()
 		dr, derr := p.decryptReader(m, pr, off, length)
 		if derr != nil {
 			_ = pr.CloseWithError(derr)
@@ -264,7 +264,7 @@ func (p *Pool) getVersionedOn(ctx context.Context, set *Set, bucket, key string,
 		return &object.GetObjectReader{ObjInfo: oi, ReadCloser: readCloser{dr, pr}}, nil
 	}
 	pr, pw := io.Pipe()
-	go func() { _ = pw.CloseWithError(set.getObject(ctx, bucket, dir, off, length, pw)) }()
+	go func() { _ = pw.CloseWithError(set.getObjectMeta(ctx, bucket, dir, m, off, length, pw)) }()
 	return &object.GetObjectReader{ObjInfo: oi, ReadCloser: pr}, nil
 }
 

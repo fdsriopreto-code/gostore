@@ -6,6 +6,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/lojadopocket/gostore/internal/object"
@@ -116,6 +117,8 @@ func (p *Pool) doList(ctx context.Context, bucket string, lp listParams) (listPa
 	var page listPage
 	seen := map[string]bool{}
 	count := 0
+	var wantKeys []string // real objects to stat for this page (in order)
+
 	for _, k := range keys {
 		if lp.prefix != "" && !strings.HasPrefix(k, lp.prefix) {
 			continue
@@ -132,7 +135,7 @@ func (p *Pool) doList(ctx context.Context, bucket string, lp listParams) (listPa
 				}
 				if count >= lp.maxKeys {
 					page.isTruncated = true
-					return page, nil
+					break
 				}
 				seen[cp] = true
 				page.prefixes = append(page.prefixes, cp)
@@ -143,15 +146,35 @@ func (p *Pool) doList(ctx context.Context, bucket string, lp listParams) (listPa
 		}
 		if count >= lp.maxKeys {
 			page.isTruncated = true
-			return page, nil
+			break
 		}
-		m, err := owner[k].statObject(ctx, bucket, k)
-		if err != nil {
-			continue
-		}
-		page.objects = append(page.objects, metaToInfo(bucket, k, m))
+		wantKeys = append(wantKeys, k)
 		page.nextMarker = k
 		count++
+	}
+
+	// Stat the page's objects in parallel — one blocking metadata read per
+	// key, so a 1000-key page was 1000 sequential round-trips before.
+	infos := make([]*object.ObjectInfo, len(wantKeys))
+	sem := make(chan struct{}, 16)
+	var wg sync.WaitGroup
+	for i, k := range wantKeys {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, k string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if m, err := owner[k].statObject(ctx, bucket, k); err == nil {
+				oi := metaToInfo(bucket, k, m)
+				infos[i] = &oi
+			}
+		}(i, k)
+	}
+	wg.Wait()
+	for _, oi := range infos {
+		if oi != nil {
+			page.objects = append(page.objects, *oi)
+		}
 	}
 	sort.Strings(page.prefixes)
 	return page, nil

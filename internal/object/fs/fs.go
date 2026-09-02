@@ -25,9 +25,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/lojadopocket/gostore/internal/nslock"
 	"github.com/lojadopocket/gostore/internal/object"
 )
 
@@ -41,9 +41,7 @@ const (
 // FS is a single-disk object.Layer.
 type FS struct {
 	root string
-
-	nsMu   sync.Mutex
-	nsLock map[string]*sync.RWMutex
+	ns   *nslock.Striped
 
 	format     diskFormat
 	justInited bool // true when this run created the format file (empty volume)
@@ -86,7 +84,7 @@ func New(root string) (*FS, error) {
 	if err != nil {
 		return nil, err
 	}
-	f := &FS{root: abs, nsLock: map[string]*sync.RWMutex{}}
+	f := &FS{root: abs, ns: nslock.New()}
 	for _, d := range []string{
 		abs,
 		filepath.Join(abs, sysDir),
@@ -163,32 +161,8 @@ func (f *FS) tmpPath() string {
 // --- namespace lock ----------------------------------------------------
 
 func (f *FS) NewNSLock(bucket string, objects ...string) object.RWLocker {
-	key := bucket
-	if len(objects) > 0 {
-		key = bucket + "/" + objects[0]
-	}
-	f.nsMu.Lock()
-	mu, ok := f.nsLock[key]
-	if !ok {
-		mu = &sync.RWMutex{}
-		f.nsLock[key] = mu
-	}
-	f.nsMu.Unlock()
-	return &nsLock{mu: mu}
+	return f.ns.For(bucket, objects...)
 }
-
-type nsLock struct{ mu *sync.RWMutex }
-
-func (l *nsLock) GetLock(ctx context.Context, _ time.Duration) (context.Context, error) {
-	l.mu.Lock()
-	return ctx, nil
-}
-func (l *nsLock) Unlock(context.Context) { l.mu.Unlock() }
-func (l *nsLock) GetRLock(ctx context.Context, _ time.Duration) (context.Context, error) {
-	l.mu.RLock()
-	return ctx, nil
-}
-func (l *nsLock) RUnlock(context.Context) { l.mu.RUnlock() }
 
 // --- lifecycle / introspection --------------------------------------
 

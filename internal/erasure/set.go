@@ -443,45 +443,76 @@ func (s *Set) encodePart(ctx context.Context, staging string, partNum int, dist 
 // Object read
 // ---------------------------------------------------------------------------
 
-// readMeta reads xl.meta from all disks and returns the majority version.
+// readMeta reads xl.meta and returns the majority version. It reads from a
+// read quorum of disks first and only widens to the rest if they don't
+// already agree — so a healthy GET/stat doesn't hit every disk (and, in a
+// cluster, doesn't fan out to every peer).
 func (s *Set) readMeta(ctx context.Context, bucket, key string) (*XLMeta, error) {
-	metas := make([]*XLMeta, s.n())
-	var wg sync.WaitGroup
-	for i, d := range s.disks {
-		wg.Add(1)
-		go func(i int, d Disk) {
-			defer wg.Done()
-			b, err := d.ReadAll(ctx, bucket, path.Join(key, metaFile))
-			if err != nil {
-				return
-			}
-			if m, err := unmarshalXLMeta(b); err == nil {
-				metas[i] = m
-			}
-		}(i, d)
-	}
-	wg.Wait()
+	n := s.n()
+	q := s.readQuorum()
 
-	tally := map[string]int{}
-	var sample = map[string]*XLMeta{}
-	for _, m := range metas {
-		if m == nil {
-			continue
+	metas := make([]*XLMeta, n)
+	read := func(idxs []int) {
+		var wg sync.WaitGroup
+		for _, i := range idxs {
+			if metas[i] != nil {
+				continue
+			}
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				b, err := s.disks[i].ReadAll(ctx, bucket, path.Join(key, metaFile))
+				if err != nil {
+					return
+				}
+				if m, err := unmarshalXLMeta(b); err == nil {
+					metas[i] = m
+				}
+			}(i)
 		}
-		h := m.contentHash()
-		tally[h]++
-		sample[h] = m
+		wg.Wait()
 	}
-	best, bestN := "", 0
-	for h, c := range tally {
-		if c > bestN {
-			best, bestN = h, c
+	decide := func() (*XLMeta, int, int) { // winner, winnerCount, haveCount
+		tally := map[string]int{}
+		sample := map[string]*XLMeta{}
+		have := 0
+		for _, m := range metas {
+			if m == nil {
+				continue
+			}
+			have++
+			h := m.contentHash()
+			tally[h]++
+			sample[h] = m
 		}
+		best, bestN := "", 0
+		for h, c := range tally {
+			if c > bestN {
+				best, bestN = h, c
+			}
+		}
+		return sample[best], bestN, have
 	}
-	if bestN >= s.readQuorum() {
-		return sample[best], nil
+
+	first := make([]int, 0, q)
+	for i := 0; i < q && i < n; i++ {
+		first = append(first, i)
 	}
-	if bestN == 0 {
+	read(first)
+	if m, bestN, _ := decide(); bestN >= q {
+		return m, nil
+	}
+
+	rest := make([]int, 0, n-len(first))
+	for i := len(first); i < n; i++ {
+		rest = append(rest, i)
+	}
+	read(rest)
+	m, bestN, have := decide()
+	if bestN >= q {
+		return m, nil
+	}
+	if have == 0 {
 		return nil, storage.ErrFileNotFound
 	}
 	return nil, ErrCorrupt
@@ -494,6 +525,12 @@ func (s *Set) getObject(ctx context.Context, bucket, key string, off, length int
 	if err != nil {
 		return err
 	}
+	return s.getObjectMeta(ctx, bucket, key, meta, off, length, w)
+}
+
+// getObjectMeta is getObject with the xl.meta already in hand, so a GET that
+// already did a stat doesn't pay for a second full metadata read.
+func (s *Set) getObjectMeta(ctx context.Context, bucket, key string, meta *XLMeta, off, length int64, w io.Writer) error {
 	if off < 0 {
 		off = 0
 	}

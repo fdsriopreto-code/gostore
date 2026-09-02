@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/lojadopocket/gostore/internal/configstore"
+	"github.com/lojadopocket/gostore/internal/nslock"
 	"github.com/lojadopocket/gostore/internal/object"
 	"github.com/lojadopocket/gostore/internal/storage"
 )
@@ -23,9 +23,7 @@ type Pool struct {
 	locker func(bucket string, objects ...string) object.RWLocker
 	mrf    *mrfQueue
 	lcache *listCache
-
-	nsMu   sync.Mutex
-	nsLock map[string]*sync.RWMutex
+	ns     *nslock.Striped
 
 	// pool layout: set indices that are being decommissioned. When empty
 	// (the common case) hasInactive is false and set placement is the plain
@@ -46,7 +44,7 @@ func NewPool(sets ...*Set) (*Pool, error) {
 	if len(sets) == 0 {
 		return nil, errors.New("erasure: no sets")
 	}
-	return &Pool{sets: sets, nsLock: map[string]*sync.RWMutex{}, lcache: newListCache()}, nil
+	return &Pool{sets: sets, ns: nslock.New(), lcache: newListCache()}, nil
 }
 
 // FromDisks is the common case: build a single set (and pool) from n disks.
@@ -132,32 +130,8 @@ func (p *Pool) NewNSLock(bucket string, objects ...string) object.RWLocker {
 	if p.locker != nil {
 		return p.locker(bucket, objects...)
 	}
-	key := bucket
-	if len(objects) > 0 {
-		key = bucket + "/" + objects[0]
-	}
-	p.nsMu.Lock()
-	mu, ok := p.nsLock[key]
-	if !ok {
-		mu = &sync.RWMutex{}
-		p.nsLock[key] = mu
-	}
-	p.nsMu.Unlock()
-	return &nsLock{mu: mu}
+	return p.ns.For(bucket, objects...)
 }
-
-type nsLock struct{ mu *sync.RWMutex }
-
-func (l *nsLock) GetLock(ctx context.Context, _ time.Duration) (context.Context, error) {
-	l.mu.Lock()
-	return ctx, nil
-}
-func (l *nsLock) Unlock(context.Context) { l.mu.Unlock() }
-func (l *nsLock) GetRLock(ctx context.Context, _ time.Duration) (context.Context, error) {
-	l.mu.RLock()
-	return ctx, nil
-}
-func (l *nsLock) RUnlock(context.Context) { l.mu.RUnlock() }
 
 // --- buckets --------------------------------------------------------
 
@@ -318,7 +292,7 @@ func (p *Pool) GetObjectNInfo(ctx context.Context, bucket, key string, rs *objec
 		cipherOff, cipherLen := cipherRange(off, length, m.Size)
 		pr, pw := io.Pipe()
 		go func() {
-			err := set.getObject(ctx, bucket, key, cipherOff, cipherLen, pw)
+			err := set.getObjectMeta(ctx, bucket, key, m, cipherOff, cipherLen, pw)
 			_ = pw.CloseWithError(err)
 		}()
 		dr, derr := p.decryptReader(m, pr, off, length)
@@ -331,7 +305,7 @@ func (p *Pool) GetObjectNInfo(ctx context.Context, bucket, key string, rs *objec
 
 	pr, pw := io.Pipe()
 	go func() {
-		err := set.getObject(ctx, bucket, key, off, length, pw)
+		err := set.getObjectMeta(ctx, bucket, key, m, off, length, pw)
 		_ = pw.CloseWithError(err)
 	}()
 	return &object.GetObjectReader{ObjInfo: oi, ReadCloser: pr}, nil
