@@ -47,9 +47,22 @@ async function api(method, path, opts = {}) {
   const { url, headers } = await sign(method, path, opts);
   return fetch(url, { method, headers, body: opts.body });
 }
+// Files above this go up as a multipart upload: split into parts, several in
+// flight at once, each part retried on failure, and the whole thing aborted
+// server-side if it can't finish. Big videos/archives upload faster and a
+// blip doesn't cost you the whole transfer.
+const MPU_THRESHOLD = 16 * 1024 * 1024;
+const MPU_PART = 16 * 1024 * 1024; // must be >= 5 MiB except the last part
+const MPU_CONCURRENCY = 3;
+
 async function upload(path, file, onProgress) {
-  const { url, headers } = await sign("PUT", "/" + path, { contentType: file.type || "application/octet-stream" });
-  return new Promise((res, rej) => {
+  if (file.size <= MPU_THRESHOLD) return uploadSingle(path, file, onProgress);
+  return uploadMultipart(path, file, onProgress);
+}
+
+function uploadSingle(path, file, onProgress) {
+  return new Promise(async (res, rej) => {
+    const { url, headers } = await sign("PUT", "/" + path, { contentType: file.type || "application/octet-stream" });
     const x = new XMLHttpRequest();
     x.open("PUT", url);
     for (const [k, v] of Object.entries(headers)) x.setRequestHeader(k, v);
@@ -58,6 +71,66 @@ async function upload(path, file, onProgress) {
     x.onerror = () => rej(new Error("network error"));
     x.send(file);
   });
+}
+
+function xhrSend(method, url, headers, body, onBytes) {
+  return new Promise((res, rej) => {
+    const x = new XMLHttpRequest();
+    x.open(method, url);
+    for (const [k, v] of Object.entries(headers)) x.setRequestHeader(k, v);
+    if (onBytes) x.upload.onprogress = (e) => e.lengthComputable && onBytes(e.loaded);
+    x.onload = () => (x.status < 300 ? res(x) : rej(new Error(exErr(x.responseText, x.status))));
+    x.onerror = () => rej(new Error("network error"));
+    x.send(body);
+  });
+}
+
+async function uploadMultipart(path, file, onProgress) {
+  const ct = file.type || "application/octet-stream";
+  const initRes = await api("POST", "/" + path, { query: { uploads: "" }, contentType: ct });
+  if (!initRes.ok) throw new Error(exErr(await initRes.text(), initRes.status));
+  const uploadId = new DOMParser().parseFromString(await initRes.text(), "text/xml")
+    .getElementsByTagName("UploadId")[0]?.textContent;
+  if (!uploadId) throw new Error("server did not return an upload id");
+
+  const nParts = Math.ceil(file.size / MPU_PART);
+  const parts = new Array(nParts);
+  const done = new Array(nParts).fill(0);
+  const bump = () => onProgress(done.reduce((a, b) => a + b, 0) / file.size);
+
+  try {
+    let next = 0;
+    const worker = async () => {
+      for (;;) {
+        const i = next++;
+        if (i >= nParts) return;
+        const start = i * MPU_PART, end = Math.min(start + MPU_PART, file.size);
+        const blob = file.slice(start, end), pn = i + 1;
+        for (let attempt = 1; ; attempt++) {
+          try {
+            const { url, headers } = await sign("PUT", "/" + path, { query: { partNumber: String(pn), uploadId } });
+            const x = await xhrSend("PUT", url, headers, blob, (loaded) => { done[i] = loaded; bump(); });
+            parts[i] = { n: pn, etag: (x.getResponseHeader("ETag") || "").replace(/"/g, "") };
+            done[i] = end - start; bump();
+            break;
+          } catch (e) {
+            if (attempt >= 3) throw e;
+            await new Promise((r) => setTimeout(r, 400 * attempt));
+          }
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(MPU_CONCURRENCY, nParts) }, worker));
+
+    const body = "<CompleteMultipartUpload>" +
+      parts.map((p) => `<Part><PartNumber>${p.n}</PartNumber><ETag>"${p.etag}"</ETag></Part>`).join("") +
+      "</CompleteMultipartUpload>";
+    const cRes = await api("POST", "/" + path, { query: { uploadId }, contentType: "application/xml", body });
+    if (!cRes.ok) throw new Error(exErr(await cRes.text(), cRes.status));
+  } catch (e) {
+    try { await api("DELETE", "/" + path, { query: { uploadId } }); } catch (_) {}
+    throw e;
+  }
 }
 async function presignGet(path, expires = 3600) {
   const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, "");
@@ -514,6 +587,28 @@ async function objectDrawer(b, o) {
           try { await must(await api("DELETE", "/" + b + "/" + o.key)); toast("Deleted", "ok"); closeDrawer(); render(); } catch (e) { toast(e.message, "err"); }
         } }, ic(ICON.trash), "Delete")));
     }, true);
+    tab("p", "Preview", async (c) => {
+      c.append(el("div", { class: "empty" }, el("span", { class: "spin" })));
+      let url;
+      try { url = await presignGet(b + "/" + o.key, 3600); } catch (e) { c.innerHTML = ""; c.append(el("div", { class: "muted small" }, e.message)); return; }
+      const ext = (o.key.split(".").pop() || "").toLowerCase();
+      const V = ["mp4", "webm", "ogv", "ogg", "mov", "m4v"], I = ["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "svg", "ico"];
+      const A = ["mp3", "wav", "flac", "aac", "m4a", "oga"], T = ["txt", "json", "csv", "log", "md", "xml", "yaml", "yml", "html", "js", "css"];
+      c.innerHTML = "";
+      let node;
+      if (V.includes(ext)) node = el("video", { src: url, controls: "", preload: "metadata", style: "width:100%;border-radius:var(--r2);background:#000;max-height:70vh" });
+      else if (I.includes(ext)) node = el("img", { src: url, style: "max-width:100%;border-radius:var(--r2)" });
+      else if (A.includes(ext)) node = el("audio", { src: url, controls: "", style: "width:100%" });
+      else if (ext === "pdf") node = el("iframe", { src: url, style: "width:100%;height:70vh;border:1px solid var(--border);border-radius:var(--r2)" });
+      else if (T.includes(ext)) {
+        node = el("pre", { class: "code", style: "max-height:62vh;overflow:auto;white-space:pre-wrap" }, "loading…");
+        try { const rr = await fetch(url); node.textContent = (await rr.text()).slice(0, 200000); } catch { node.textContent = "(could not load)"; }
+      } else node = el("div", { class: "muted small" }, "No inline preview for ." + (ext || "?") + " — use Download or the Share tab.");
+      c.append(node);
+      if (V.includes(ext) || A.includes(ext))
+        c.append(el("p", { class: "muted small", style: "margin-top:10px" },
+          "Streams via HTTP range requests — the player fetches only the bytes it needs, so playback and seeking start immediately without downloading the whole file."));
+    });
     tab("s", "Share", (c) => {
       const sel = el("select"); for (const [l, val] of [["15 minutes", 900], ["1 hour", 3600], ["24 hours", 86400], ["7 days", 604800]]) sel.append(el("option", { value: val }, l));
       const out = el("textarea", { readonly: "", style: "min-height:84px" });
@@ -768,7 +863,7 @@ const DOCS = [
     ]));
     c.append(callout("HTTPS", "Put a TLS terminator (Caddy, nginx, your PaaS) in front of the API for production. SDKs will refuse to send credentials over plain HTTP unless you explicitly allow it.", "warn"));
     c.append(el("h3", {}, "2. Create a bucket and upload"));
-    c.append(P("From this console: Buckets → Create bucket, then open it and drag files in. From the CLI:"));
+    c.append(P("From this console: Buckets → Create bucket, then open it and drag files in — files over 16&nbsp;MiB upload as a multipart transfer (parts in parallel, each retried on failure). Open any object → <b>Preview</b> to play video/audio (streamed via range requests) or view images, PDFs and text inline. From the CLI:"));
     c.append(codeBlock(
 `aws --endpoint-url ${x.origin} --region ${x.region} \\
   s3 mb s3://my-bucket
