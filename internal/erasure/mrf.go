@@ -150,7 +150,10 @@ func (p *Pool) drainMRF(ctx context.Context) {
 		}
 		bucket, key := id[:slash], id[slash+1:]
 		set := p.setFor(key)
-		if _, _, err := set.healObject(ctx, bucket, key); err != nil {
+		release := healThrottle()
+		_, _, err := set.healObject(ctx, bucket, key)
+		release()
+		if err != nil {
 			failed++
 			continue
 		}

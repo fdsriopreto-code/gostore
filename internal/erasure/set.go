@@ -646,6 +646,7 @@ func (s *Set) readPart(ctx context.Context, bucket, key string, meta *XLMeta, pm
 	shards := make([][]byte, n)
 	disable := make([]bool, n)
 	var stripeBuf bytes.Buffer
+	degraded := false // a shard was missing/corrupt and we reconstructed around it
 
 	for partRemaining > 0 && *remaining > 0 {
 		thisStripeLogical := stripeLen
@@ -711,6 +712,9 @@ func (s *Set) readPart(ctx context.Context, bucket, key string, meta *XLMeta, pm
 		if have < meta.Erasure.DataBlocks {
 			return ErrReadQuorum
 		}
+		if have < n {
+			degraded = true // at least one shard was bad/missing this stripe
+		}
 
 		stripeBuf.Reset()
 		if err := s.ec.DecodeData(shards, int(thisStripeLogical), &stripeBuf); err != nil {
@@ -748,6 +752,15 @@ func (s *Set) readPart(ctx context.Context, bucket, key string, meta *XLMeta, pm
 			integrityFailed(bucket, key, pm.Number, pm.ETag, got)
 			return ErrObjectMismatch
 		}
+	}
+
+	// Inline read-repair: we served correct bytes by reconstructing around a
+	// bad/missing shard — queue the object for an immediate background heal so
+	// the damage doesn't linger until the scanner's next sample. Deduped by
+	// the MRF queue, so a hot damaged object is enqueued once.
+	if degraded && s.mrf != nil && bucket != "" {
+		s.mrf(bucket, key)
+		metrics.RepairQueued()
 	}
 	return nil
 }

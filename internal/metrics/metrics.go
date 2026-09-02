@@ -31,6 +31,7 @@ var (
 	integrityFail atomic.Uint64
 	healObjects   atomic.Uint64
 	healFail      atomic.Uint64
+	repairQueued  atomic.Uint64 // objects enqueued for heal from the read path
 
 	// request-duration histogram (seconds), fixed buckets.
 	durBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
@@ -59,6 +60,10 @@ func APIError(code string) {
 // IntegrityFailure records one object that failed end-to-end checksum
 // verification when it was read back.
 func IntegrityFailure() { integrityFail.Add(1) }
+
+// RepairQueued records that a read reconstructed around a bad shard and
+// enqueued the object for background heal.
+func RepairQueued() { repairQueued.Add(1) }
 
 // HealResult records the outcome of one background heal attempt.
 func HealResult(ok bool) {
@@ -194,6 +199,10 @@ func WritePrometheus(w io.Writer, g Gauges) {
 		help("gostore_heal_objects_total", "counter", "Background heal attempts by outcome.")
 		line(fmt.Sprintf("gostore_heal_objects_total{result=%q} %d", "ok", ok))
 		line(fmt.Sprintf("gostore_heal_objects_total{result=%q} %d", "error", bad))
+	}
+	if v := repairQueued.Load(); v > 0 {
+		help("gostore_read_repair_queued_total", "counter", "Objects enqueued for heal because a read reconstructed around a bad shard.")
+		line(fmt.Sprintf("gostore_read_repair_queued_total %d", v))
 	}
 
 	help("gostore_disks", "gauge", "Disk counts by state.")

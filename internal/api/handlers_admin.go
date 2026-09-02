@@ -52,6 +52,16 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		s.adminHeal(w, r)
 	case path == "scanner/run" && r.Method == http.MethodPost:
 		writeJSON(w, http.StatusOK, s.scan.ScanOnce(r.Context()))
+	case path == "scrub" && r.Method == http.MethodGet:
+		st := s.scan.ScrubStatus()
+		if st == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"running": false, "neverRun": true})
+			return
+		}
+		writeJSON(w, http.StatusOK, st)
+	case path == "scrub" && r.Method == http.MethodPost:
+		go s.scan.DeepScrub(context.Background())
+		writeJSON(w, http.StatusAccepted, map[string]any{"started": true})
 	case path == "datausage" && r.Method == http.MethodGet:
 		u := s.scan.Usage()
 		if u == nil {

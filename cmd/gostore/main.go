@@ -310,8 +310,15 @@ func serve(cfg config.Config, obj object.Layer, clusterRPC http.Handler) error {
 	scanCtx, stopScan := context.WithCancel(context.Background())
 	defer stopScan()
 	scan := scanner.New(obj, bcfg, scanInterval)
+	scrubInterval := 7 * 24 * time.Hour // weekly guaranteed full verify+repair
+	if v := os.Getenv("GOSTORE_SCRUB_INTERVAL"); v != "" {
+		if d, perr := time.ParseDuration(v); perr == nil {
+			scrubInterval = d // 0 disables
+		}
+	}
+	scan.SetScrubInterval(scrubInterval)
 	go scan.Run(scanCtx)
-	logger.Info("background scanner started", "interval", scanInterval)
+	logger.Info("background scanner started", "interval", scanInterval, "deepScrubInterval", scrubInterval)
 
 	apiSrv := &http.Server{
 		Addr:              cfg.Address,

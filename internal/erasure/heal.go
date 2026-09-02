@@ -34,7 +34,9 @@ func (p *Pool) Heal(ctx context.Context) (HealReport, error) {
 			}
 			for _, k := range keys {
 				rep.ObjectsScanned++
+				release := healThrottle()
 				meta, shards, hErr := set.healObject(ctx, b.Name, k)
+				release()
 				rep.MetaRewritten += meta
 				rep.ShardsRewritten += shards
 				if hErr != nil {
@@ -111,6 +113,8 @@ func (p *Pool) AutoHeal(ctx context.Context) {
 // HealObject repairs a single object's missing/corrupt shards and xl.meta
 // copies in place. Implements the healer interface the scanner samples with.
 func (p *Pool) HealObject(ctx context.Context, bucket, key string) error {
+	release := healThrottle()
+	defer release()
 	_, _, err := p.setFor(key).healObject(ctx, bucket, key)
 	return err
 }

@@ -52,6 +52,24 @@ type Scanner struct {
 
 	usage       atomic.Pointer[DataUsage]
 	healScanned uint64
+
+	// Deep scrub: a guaranteed full pass that verifies (and repairs) every
+	// object's shards, versus the 1-in-N heal sample the lifecycle pass does.
+	scrubInterval time.Duration
+	scrub         atomic.Pointer[ScrubStatus]
+	scrubRunning  atomic.Bool
+}
+
+// ScrubStatus is the progress of the current or most recent deep scrub.
+type ScrubStatus struct {
+	Running       bool      `json:"running"`
+	StartedAt     time.Time `json:"startedAt"`
+	FinishedAt    time.Time `json:"finishedAt,omitempty"`
+	Bucket        string    `json:"bucket,omitempty"`
+	ObjectsDone   int64     `json:"objectsScanned"`
+	Repaired      int64     `json:"objectsRepaired"`
+	Unrecoverable int64     `json:"unrecoverable"`
+	Errors        int64     `json:"errors"`
 }
 
 // New builds a Scanner. interval <= 0 defaults to one hour.
@@ -66,17 +84,34 @@ func New(obj object.Layer, cfg *bucketcfg.Store, interval time.Duration) *Scanne
 	return s
 }
 
+// SetScrubInterval enables the periodic deep scrub (<=0 disables it).
+func (s *Scanner) SetScrubInterval(d time.Duration) { s.scrubInterval = d }
+
+// ScrubStatus returns the latest deep-scrub progress (nil if never run).
+func (s *Scanner) ScrubStatus() *ScrubStatus { return s.scrub.Load() }
+
 // Usage returns the most recent data-usage snapshot (nil before the first
 // pass completes).
 func (s *Scanner) Usage() *DataUsage { return s.usage.Load() }
 
-// Run scans once immediately, then every interval, until ctx is done.
+// Run scans once immediately, then every interval, until ctx is done. When a
+// scrub interval is set it also fires a throttled full deep scrub on that
+// (longer) cadence.
 func (s *Scanner) Run(ctx context.Context) {
 	t := time.NewTicker(s.interval)
 	defer t.Stop()
 	if rep := s.ScanOnce(ctx); rep.nonZero() {
 		logger.Info("lifecycle scan", rep.args()...)
 	}
+
+	var scrubC <-chan time.Time
+	if s.scrubInterval > 0 && s.healer != nil {
+		st := time.NewTicker(s.scrubInterval)
+		defer st.Stop()
+		scrubC = st.C
+		go s.DeepScrub(ctx) // one on startup, then on the ticker
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -85,8 +120,76 @@ func (s *Scanner) Run(ctx context.Context) {
 			if rep := s.ScanOnce(ctx); rep.nonZero() {
 				logger.Info("lifecycle scan", rep.args()...)
 			}
+		case <-scrubC:
+			go s.DeepScrub(ctx)
 		}
 	}
+}
+
+// DeepScrub verifies and repairs every object in every bucket — the
+// guaranteed full pass. It is heavily rate-limited by the backend's heal
+// throttle so it never starves client I/O, and skips itself if one is
+// already running.
+func (s *Scanner) DeepScrub(ctx context.Context) {
+	if s.healer == nil || !s.scrubRunning.CompareAndSwap(false, true) {
+		return
+	}
+	defer s.scrubRunning.Store(false)
+
+	st := &ScrubStatus{Running: true, StartedAt: time.Now().UTC()}
+	s.scrub.Store(st)
+	logger.Info("deep scrub started")
+
+	buckets, err := s.obj.ListBuckets(ctx)
+	if err != nil {
+		st.Errors++
+		st.Running, st.FinishedAt = false, time.Now().UTC()
+		s.scrub.Store(st)
+		return
+	}
+	for _, b := range buckets {
+		st.Bucket = b.Name
+		token := ""
+		for {
+			if ctx.Err() != nil {
+				break
+			}
+			li, err := s.obj.ListObjectsV2(ctx, b.Name, "", token, "", 1000, false, "")
+			if err != nil {
+				st.Errors++
+				break
+			}
+			for _, o := range li.Objects {
+				if ctx.Err() != nil {
+					break
+				}
+				err := s.healer.HealObject(ctx, b.Name, o.Name) // throttled inside
+				st.ObjectsDone++
+				switch {
+				case err == nil:
+				case isUnrecoverable(err):
+					st.Unrecoverable++
+				default:
+					st.Errors++
+				}
+				s.scrub.Store(cloneScrub(st))
+			}
+			if !li.IsTruncated {
+				break
+			}
+			token = li.NextContinuationToken
+		}
+	}
+	st.Running, st.FinishedAt, st.Bucket = false, time.Now().UTC(), ""
+	s.scrub.Store(st)
+	logger.Info("deep scrub complete",
+		"objects", st.ObjectsDone, "unrecoverable", st.Unrecoverable, "errors", st.Errors)
+}
+
+func cloneScrub(s *ScrubStatus) *ScrubStatus { c := *s; return &c }
+
+func isUnrecoverable(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "quorum")
 }
 
 // Report summarises a scan pass.
