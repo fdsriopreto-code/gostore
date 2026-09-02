@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"hash/fnv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -108,6 +109,33 @@ func (r Report) args() []any {
 	}
 }
 
+// expRule is a lifecycle rule pre-parsed for the walk.
+type expRule struct {
+	prefix     string
+	days       int
+	date       time.Time
+	noncurrent int
+	abortMPU   int
+}
+
+func enabledRules(rules []bucketcfg.LifecycleRule) []expRule {
+	var out []expRule
+	for _, r := range rules {
+		if r.Status != "Enabled" {
+			continue
+		}
+		er := expRule{prefix: r.Prefix, days: r.ExpirationDays,
+			noncurrent: r.NoncurrentVersionExpirationDays, abortMPU: r.AbortIncompleteMultipartDays}
+		if r.ExpirationDate != "" {
+			if t, err := time.Parse(time.RFC3339, r.ExpirationDate); err == nil {
+				er.date = t
+			}
+		}
+		out = append(out, er)
+	}
+	return out
+}
+
 // ScanOnce runs a single pass and returns what it did.
 func (s *Scanner) ScanOnce(ctx context.Context) Report {
 	var rep Report
@@ -120,31 +148,29 @@ func (s *Scanner) ScanOnce(ctx context.Context) Report {
 
 	usage := &DataUsage{LastUpdate: now, Buckets: map[string]BucketUsage{}}
 	for _, b := range buckets {
-		// Walk every object once: accumulate usage + opportunistic heal.
-		bu := s.walkBucket(ctx, b.Name, &rep)
+		rules := enabledRules(s.cfg.Get(b.Name).Lifecycle)
+
+		// One walk of the bucket: usage + opportunistic heal + current-version
+		// expiration for every rule (was one full ListObjects pass per rule).
+		bu := s.walkBucket(ctx, b.Name, rules, now, &rep)
 		usage.Buckets[b.Name] = bu
 		usage.TotalObjects += bu.Objects
 		usage.TotalBytes += bu.Bytes
 
-		rules := s.cfg.Get(b.Name).Lifecycle
 		if len(rules) == 0 {
 			continue
 		}
 		rep.BucketsScanned++
-		for _, rule := range rules {
-			if rule.Status != "Enabled" {
-				continue
-			}
-			s.applyRule(ctx, b.Name, rule, now, &rep)
-		}
+		s.expireNoncurrent(ctx, b.Name, rules, now, &rep)
+		s.abortStaleUploads(ctx, b.Name, rules, now, &rep)
 	}
 	s.usage.Store(usage)
 	return rep
 }
 
-// walkBucket lists every object in the bucket, tallies size, and heals a
-// 1-in-healSampleRate sample when the backend supports it.
-func (s *Scanner) walkBucket(ctx context.Context, bucket string, rep *Report) BucketUsage {
+// walkBucket lists every object once: tallies size, heals a
+// 1-in-healSampleRate sample, and applies current-version expiration.
+func (s *Scanner) walkBucket(ctx context.Context, bucket string, rules []expRule, now time.Time, rep *Report) BucketUsage {
 	var bu BucketUsage
 	token := ""
 	for {
@@ -163,11 +189,102 @@ func (s *Scanner) walkBucket(ctx context.Context, bucket string, rep *Report) Bu
 					rep.Errors++
 				}
 			}
+			for _, r := range rules {
+				if (r.days <= 0 && r.date.IsZero()) || !strings.HasPrefix(o.Name, r.prefix) {
+					continue
+				}
+				if !dueForExpiry(o.ModTime, r.days, r.date, now) {
+					continue
+				}
+				if _, err := s.obj.DeleteObject(ctx, bucket, o.Name, object.ObjectOptions{Versioned: true}); err != nil {
+					if !errors.Is(err, object.ErrObjectLocked) {
+						rep.Errors++
+					}
+				} else {
+					rep.ObjectsExpired++
+				}
+				break
+			}
 		}
 		if !li.IsTruncated {
 			return bu
 		}
 		token = li.NextContinuationToken
+	}
+}
+
+// expireNoncurrent removes noncurrent versions older than the smallest
+// matching rule's threshold — one version listing for the whole bucket.
+func (s *Scanner) expireNoncurrent(ctx context.Context, bucket string, rules []expRule, now time.Time, rep *Report) {
+	want := false
+	for _, r := range rules {
+		if r.noncurrent > 0 {
+			want = true
+		}
+	}
+	if !want {
+		return
+	}
+	lv, err := s.obj.ListObjectVersions(ctx, bucket, "", "", "", "", 1000)
+	if err != nil {
+		rep.Errors++
+		return
+	}
+	for _, o := range lv.Objects {
+		if o.IsLatest || o.VersionID == "" || o.VersionID == "null" {
+			continue
+		}
+		days := 0
+		for _, r := range rules {
+			if r.noncurrent > 0 && strings.HasPrefix(o.Name, r.prefix) && (days == 0 || r.noncurrent < days) {
+				days = r.noncurrent
+			}
+		}
+		if days == 0 || now.Sub(o.ModTime) < time.Duration(days)*24*time.Hour {
+			continue
+		}
+		if _, err := s.obj.DeleteObject(ctx, bucket, o.Name, object.ObjectOptions{VersionID: o.VersionID}); err != nil {
+			if !errors.Is(err, object.ErrObjectLocked) {
+				rep.Errors++
+			}
+			continue
+		}
+		rep.VersionsExpired++
+	}
+}
+
+// abortStaleUploads aborts multipart uploads older than the smallest
+// matching rule's threshold — one multipart listing for the whole bucket.
+func (s *Scanner) abortStaleUploads(ctx context.Context, bucket string, rules []expRule, now time.Time, rep *Report) {
+	want := false
+	for _, r := range rules {
+		if r.abortMPU > 0 {
+			want = true
+		}
+	}
+	if !want {
+		return
+	}
+	mu, err := s.obj.ListMultipartUploads(ctx, bucket, "", "", "", "", 1000)
+	if err != nil {
+		rep.Errors++
+		return
+	}
+	for _, u := range mu.Uploads {
+		days := 0
+		for _, r := range rules {
+			if r.abortMPU > 0 && strings.HasPrefix(u.Object, r.prefix) && (days == 0 || r.abortMPU < days) {
+				days = r.abortMPU
+			}
+		}
+		if days == 0 || u.Initiated.After(now.Add(-time.Duration(days)*24*time.Hour)) {
+			continue
+		}
+		if err := s.obj.AbortMultipartUpload(ctx, bucket, u.Object, u.UploadID, object.ObjectOptions{}); err != nil {
+			rep.Errors++
+			continue
+		}
+		rep.UploadsAborted++
 	}
 }
 
@@ -178,87 +295,6 @@ func (s *Scanner) shouldHeal(bucket, key string) bool {
 	_, _ = h.Write([]byte(bucket + "/" + key))
 	pass := uint32(atomic.AddUint64(&s.healScanned, 1) / 4096)
 	return (h.Sum32()+pass)%healSampleRate == 0
-}
-
-func (s *Scanner) applyRule(ctx context.Context, bucket string, rule bucketcfg.LifecycleRule, now time.Time, rep *Report) {
-	var expireDate time.Time
-	if rule.ExpirationDate != "" {
-		if t, err := time.Parse(time.RFC3339, rule.ExpirationDate); err == nil {
-			expireDate = t
-		}
-	}
-
-	// 1. current-version / plain object expiration
-	if rule.ExpirationDays > 0 || !expireDate.IsZero() {
-		token := ""
-		for {
-			li, err := s.obj.ListObjectsV2(ctx, bucket, rule.Prefix, token, "", 1000, false, "")
-			if err != nil {
-				rep.Errors++
-				break
-			}
-			for _, o := range li.Objects {
-				if !dueForExpiry(o.ModTime, rule.ExpirationDays, expireDate, now) {
-					continue
-				}
-				if _, err := s.obj.DeleteObject(ctx, bucket, o.Name, object.ObjectOptions{Versioned: true}); err != nil {
-					if !errors.Is(err, object.ErrObjectLocked) {
-						rep.Errors++
-					}
-					continue
-				}
-				rep.ObjectsExpired++
-			}
-			if !li.IsTruncated {
-				break
-			}
-			token = li.NextContinuationToken
-		}
-	}
-
-	// 2. noncurrent version expiration
-	if rule.NoncurrentVersionExpirationDays > 0 {
-		lv, err := s.obj.ListObjectVersions(ctx, bucket, rule.Prefix, "", "", "", 1000)
-		if err != nil {
-			rep.Errors++
-		} else {
-			for _, o := range lv.Objects {
-				if o.IsLatest || o.VersionID == "" || o.VersionID == "null" {
-					continue
-				}
-				if now.Sub(o.ModTime) < time.Duration(rule.NoncurrentVersionExpirationDays)*24*time.Hour {
-					continue
-				}
-				if _, err := s.obj.DeleteObject(ctx, bucket, o.Name, object.ObjectOptions{VersionID: o.VersionID}); err != nil {
-					if !errors.Is(err, object.ErrObjectLocked) {
-						rep.Errors++
-					}
-					continue
-				}
-				rep.VersionsExpired++
-			}
-		}
-	}
-
-	// 3. abort incomplete multipart uploads
-	if rule.AbortIncompleteMultipartDays > 0 {
-		mu, err := s.obj.ListMultipartUploads(ctx, bucket, rule.Prefix, "", "", "", 1000)
-		if err != nil {
-			rep.Errors++
-		} else {
-			cutoff := now.Add(-time.Duration(rule.AbortIncompleteMultipartDays) * 24 * time.Hour)
-			for _, u := range mu.Uploads {
-				if u.Initiated.After(cutoff) {
-					continue
-				}
-				if err := s.obj.AbortMultipartUpload(ctx, bucket, u.Object, u.UploadID, object.ObjectOptions{}); err != nil {
-					rep.Errors++
-					continue
-				}
-				rep.UploadsAborted++
-			}
-		}
-	}
 }
 
 func dueForExpiry(mod time.Time, days int, date, now time.Time) bool {
