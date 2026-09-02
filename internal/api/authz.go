@@ -4,9 +4,54 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync"
 
 	"github.com/lojadopocket/gostore/internal/iam/policy"
 )
+
+// bucketPolicyCache memoises the parsed form of each bucket's policy document.
+// Without it every request that reaches the bucket-policy check (notably every
+// GET against a public bucket) re-runs a JSON unmarshal + policy compile.
+// Keyed by bucket; the stored raw text is compared on lookup so an edited
+// policy is recompiled automatically — one entry per bucket, no eviction
+// needed.
+type bucketPolicyCache struct {
+	mu sync.RWMutex
+	m  map[string]compiledPolicy
+}
+
+type compiledPolicy struct {
+	raw string
+	pol *policy.Policy // nil when the document failed to parse
+}
+
+func newBucketPolicyCache() *bucketPolicyCache {
+	return &bucketPolicyCache{m: map[string]compiledPolicy{}}
+}
+
+// get returns the compiled policy for doc, parsing and caching on a miss or
+// when the document has changed since it was cached. ok is false when doc is
+// empty or does not parse.
+func (c *bucketPolicyCache) get(bucket string, doc []byte) (*policy.Policy, bool) {
+	if len(doc) == 0 {
+		return nil, false
+	}
+	raw := string(doc)
+	c.mu.RLock()
+	e, hit := c.m[bucket]
+	c.mu.RUnlock()
+	if hit && e.raw == raw {
+		return e.pol, e.pol != nil
+	}
+	p, err := policy.Parse(doc)
+	if err != nil {
+		p = nil
+	}
+	c.mu.Lock()
+	c.m[bucket] = compiledPolicy{raw: raw, pol: p}
+	c.mu.Unlock()
+	return p, p != nil
+}
 
 // authorizeS3 decides whether the request may proceed. Order:
 //  1. IAM policy of the authenticated user (root always passes);
@@ -42,12 +87,8 @@ func (s *Server) bucketPolicyAllows(bucket string, args policy.Args) bool {
 	if bucket == "" || s.bcfg == nil {
 		return false
 	}
-	doc := s.bcfg.Get(bucket).Policy
-	if len(doc) == 0 {
-		return false
-	}
-	p, err := policy.Parse(doc)
-	if err != nil {
+	p, ok := s.polCache.get(bucket, s.bcfg.Get(bucket).Policy)
+	if !ok {
 		return false
 	}
 	return p.IsAllowed(args)

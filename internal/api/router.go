@@ -28,6 +28,8 @@ type Server struct {
 	scan *scanner.Scanner
 	rl   *rateLimiter
 
+	polCache *bucketPolicyCache
+
 	domainNames []string
 }
 
@@ -41,9 +43,10 @@ func NewServer(cfg config.Config, obj object.Layer, im *iam.Manager, bc *bucketc
 	}
 	s := &Server{
 		cfg: cfg, obj: obj, iam: im, bcfg: bc, bus: bus,
-		repl: replication.New(bc, obj),
-		scan: scan,
-		rl:   newRateLimiter(),
+		repl:     replication.New(bc, obj),
+		scan:     scan,
+		rl:       newRateLimiter(),
+		polCache: newBucketPolicyCache(),
 	}
 	if v := strings.TrimSpace(os.Getenv("GOSTORE_DOMAIN")); v != "" {
 		for _, d := range strings.Split(v, ",") {

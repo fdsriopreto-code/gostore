@@ -51,6 +51,13 @@ type Manager struct {
 	sts   map[string]stsRec // in-memory only (M9)
 	store *store
 
+	// inlineCache memoises the parsed form of each service account's inline
+	// policy so Identity() (called on every authenticated request) doesn't
+	// re-unmarshal it. Keyed by access key; the raw text is compared so an
+	// updated inline policy is picked up automatically.
+	inlineMu    sync.RWMutex
+	inlineCache map[string]inlineCompiled
+
 	// lastSync is the UpdatedAt stamp of the persisted blob we last wrote or
 	// loaded; the background refresher only re-applies a newer one.
 	lastSync time.Time
@@ -63,18 +70,49 @@ type stsRec struct {
 	expiry     time.Time
 }
 
+type inlineCompiled struct {
+	raw string
+	pol *policy.Policy
+}
+
+// compileInline returns the parsed inline policy for accessKey, parsing and
+// caching on a miss or when doc changed. Returns nil if doc is empty or bad.
+func (m *Manager) compileInline(accessKey, doc string) *policy.Policy {
+	if doc == "" {
+		return nil
+	}
+	m.inlineMu.RLock()
+	e, hit := m.inlineCache[accessKey]
+	m.inlineMu.RUnlock()
+	if hit && e.raw == doc {
+		return e.pol
+	}
+	p, err := policy.Parse([]byte(doc))
+	if err != nil {
+		p = nil
+	}
+	m.inlineMu.Lock()
+	if m.inlineCache == nil {
+		m.inlineCache = map[string]inlineCompiled{}
+	}
+	m.inlineCache[accessKey] = inlineCompiled{raw: doc, pol: p}
+	m.inlineMu.Unlock()
+	return p
+}
+
 // New builds a Manager with the given root credential, persisting through the
 // configstore backend (an object replicated across the cluster).
 func New(rootAccess, rootSecret string, be configstore.Backend) (*Manager, error) {
 	m := &Manager{
-		rootAccess: rootAccess,
-		rootSecret: rootSecret,
-		users:      map[string]userRec{},
-		svcAccts:   map[string]svcAcctRec{},
-		custom:     map[string]*policy.Policy{},
-		builtin:    policy.Builtin(),
-		sts:        map[string]stsRec{},
-		store:      newStore(be),
+		rootAccess:  rootAccess,
+		rootSecret:  rootSecret,
+		users:       map[string]userRec{},
+		svcAccts:    map[string]svcAcctRec{},
+		custom:      map[string]*policy.Policy{},
+		builtin:     policy.Builtin(),
+		sts:         map[string]stsRec{},
+		store:       newStore(be),
+		inlineCache: map[string]inlineCompiled{},
 	}
 	p, err := m.store.load()
 	if err != nil {
@@ -202,11 +240,7 @@ func (m *Manager) Identity(accessKey string) (*Identity, bool) {
 		} else if s.ParentUser == m.rootAccess {
 			id.IsRoot = true
 		}
-		if s.InlinePolicy != "" {
-			if pol, err := policy.Parse([]byte(s.InlinePolicy)); err == nil {
-				id.Inline = pol
-			}
-		}
+		id.Inline = m.compileInline(accessKey, s.InlinePolicy)
 		return id, true
 	}
 	if s, ok := m.sts[accessKey]; ok && time.Now().Before(s.expiry) {
