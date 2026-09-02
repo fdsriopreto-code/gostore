@@ -35,6 +35,7 @@ import (
 	"github.com/lojadopocket/gostore/internal/configstore"
 	"github.com/lojadopocket/gostore/internal/erasure"
 	"github.com/lojadopocket/gostore/internal/event"
+	"github.com/lojadopocket/gostore/internal/gostorecli"
 	"github.com/lojadopocket/gostore/internal/iam"
 	"github.com/lojadopocket/gostore/internal/kms"
 	"github.com/lojadopocket/gostore/internal/logger"
@@ -65,6 +66,8 @@ func main() {
 		fmt.Printf("gostore %s %s/%s (%s)\n", version, runtime.GOOS, runtime.GOARCH, runtime.Version())
 	case "help", "-h", "--help":
 		usage()
+	case "alias", "ls", "cp", "rm", "mb", "rb", "cat", "stat", "admin":
+		os.Exit(gostorecli.Run(os.Args[1:]))
 	default:
 		fmt.Fprintf(os.Stderr, "gostore: unknown command %q\n\n", os.Args[1])
 		usage()
@@ -78,6 +81,12 @@ func usage() {
 Usage:
   gostore server [flags] VOLUME [VOLUME...]
   gostore version
+
+Client (talks to a gostore/S3 endpoint):
+  gostore alias set NAME URL ACCESS SECRET
+  gostore ls|cp|rm|mb|rb|cat|stat ...
+  gostore admin info|heal|scrub|readonly|snapshot NAME ...
+  (run any of these with no args for details)
 
 Flags (server):
   --address ADDR           S3 API listen address (default ":9000")

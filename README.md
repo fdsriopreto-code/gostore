@@ -190,6 +190,28 @@ sudo systemctl status gostore
 
 Coloque um TLS terminator (Caddy/nginx) na frente da porta 9000 para produção.
 
+## CLI embutida (`gostore`)
+
+O mesmo binário é cliente. Sem `mc`/`aws` separados:
+
+```bash
+gostore alias set gs http://localhost:9000 gostoreadmin uma-senha-com-min-8-chars
+gostore mb   gs/meu-bucket
+gostore cp   ./arquivo.zip gs/meu-bucket/
+gostore cp   ./dir  gs/meu-bucket/dir -r
+gostore ls   gs/meu-bucket
+gostore cat  gs/meu-bucket/arquivo.zip | sha256sum
+gostore rm   gs/meu-bucket/velho.txt -r
+gostore stat gs/meu-bucket/arquivo.zip
+
+gostore admin info     gs
+gostore admin scrub    gs                 # dispara deep scrub; "scrub status" pra ver
+gostore admin readonly gs on
+gostore admin snapshot gs meu-bucket      # snapshot / "list" / "restore <id>"
+```
+
+Aliases ficam em `~/.gostore/aliases.json` (`GOSTORE_ALIAS_FILE` sobrescreve).
+
 ## Usando com clientes S3
 
 Path-style, região `us-east-1` (default). Exemplos com `mc` e `aws`:
