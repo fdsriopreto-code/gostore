@@ -39,6 +39,16 @@ type Config struct {
 	// it is a soft (eventually-consistent) quota.
 	QuotaBytes   int64 `json:"quotaBytes,omitempty"`
 	QuotaObjects int64 `json:"quotaObjects,omitempty"`
+
+	// Website, when set, turns the bucket into a static site: a GET for "/"
+	// or a "dir/" path serves IndexDocument, and a miss serves ErrorDocument.
+	Website *WebsiteConfig `json:"website,omitempty"`
+}
+
+// WebsiteConfig is the static-website-hosting configuration for a bucket.
+type WebsiteConfig struct {
+	IndexDocument string `json:"indexDocument,omitempty"` // e.g. "index.html"
+	ErrorDocument string `json:"errorDocument,omitempty"` // e.g. "404.html"
 }
 
 // LifecycleRule is a subset of an S3 lifecycle rule.

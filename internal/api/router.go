@@ -161,6 +161,16 @@ func (s *Server) handleS3(w http.ResponseWriter, r *http.Request) {
 
 	q := r.URL.Query()
 
+	// Static-website serving: a plain GET (no S3 sub-resource query) against a
+	// website-enabled bucket serves index/error documents. Sub-resource calls
+	// (?list-type, ?versioning, ?w=, …) fall through to the normal API.
+	if r.Method == http.MethodGet {
+		if ws := s.websiteConfigFor(req.Bucket, q); ws != nil {
+			s.serveWebsite(w, r, req.Bucket, req.Object, ws, accessKey)
+			return
+		}
+	}
+
 	// CORS: answer preflight, and stamp headers on the eventual response.
 	if s.applyCORS(w, r, req.Bucket) {
 		return
@@ -214,6 +224,8 @@ func (s *Server) dispatchBucket(w http.ResponseWriter, r *http.Request, bucket s
 			s.handleGetBucketLifecycle(w, r, bucket)
 		case has("notification"):
 			s.handleGetBucketNotification(w, r, bucket)
+		case has("website"):
+			s.handleGetBucketWebsite(w, r, bucket)
 		case has("quota"):
 			s.handleGetBucketQuota(w, r, bucket)
 		case q["list-type"] != nil && q["list-type"][0] == "2":
@@ -239,6 +251,8 @@ func (s *Server) dispatchBucket(w http.ResponseWriter, r *http.Request, bucket s
 			s.handlePutBucketReplication(w, r, bucket)
 		case has("lifecycle"):
 			s.handlePutBucketLifecycle(w, r, bucket)
+		case has("website"):
+			s.handlePutBucketWebsite(w, r, bucket)
 		case has("quota"):
 			s.handlePutBucketQuota(w, r, bucket)
 		case has("acl"):
@@ -258,6 +272,8 @@ func (s *Server) dispatchBucket(w http.ResponseWriter, r *http.Request, bucket s
 			s.handleDeleteBucketReplication(w, r, bucket)
 		case has("lifecycle"):
 			s.handleDeleteBucketLifecycle(w, r, bucket)
+		case has("website"):
+			s.handleDeleteBucketWebsite(w, r, bucket)
 		case has("quota"):
 			s.handleDeleteBucketQuota(w, r, bucket)
 		default:

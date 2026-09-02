@@ -57,6 +57,7 @@ const (
 	ErrQuotaExceeded
 	ErrMalformedPOSTRequest
 	ErrInvalidPolicyDocument
+	ErrNoSuchWebsiteConfiguration
 )
 
 // APIError is the resolved (code, message, http status) triple.
@@ -111,6 +112,7 @@ var errorCodeMap = map[APIErrorCode]APIError{
 	ErrQuotaExceeded:                 {"QuotaExceeded", "The bucket quota would be exceeded by this operation.", http.StatusForbidden},
 	ErrMalformedPOSTRequest:          {"MalformedPOSTRequest", "The body of your POST request is not well-formed multipart/form-data.", http.StatusBadRequest},
 	ErrInvalidPolicyDocument:         {"InvalidPolicyDocument", "The content of the form does not meet the conditions specified in the policy document.", http.StatusForbidden},
+	ErrNoSuchWebsiteConfiguration:    {"NoSuchWebsiteConfiguration", "The specified bucket does not have a website configuration.", http.StatusNotFound},
 }
 
 // GetAPIError resolves a code; unknown codes fall back to InternalError.

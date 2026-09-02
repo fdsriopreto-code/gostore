@@ -966,6 +966,29 @@ async function bucketSettings(v, b) {
   await editor("Event notifications", "notification", "application/json",
     JSON.stringify({ webhooks: [{ id: "w1", url: "https://example.com/hook", events: ["s3:ObjectCreated:*"], prefix: "", suffix: "" }] }, null, 2));
 
+  // --- Static website hosting ---
+  {
+    let idx = "index.html", errd = "", on = false;
+    try {
+      const doc = parseXml(await (await api("GET", "/" + b, { query: { website: "" } })).text());
+      idx = t(doc, "Suffix") || "index.html"; errd = t(doc, "Key") || ""; on = true;
+    } catch {}
+    const iIn = el("input", { value: idx, placeholder: "index.html", style: "max-width:220px" });
+    const eIn = el("input", { value: errd, placeholder: "404.html (optional)", style: "max-width:220px" });
+    sec("Static website hosting",
+      el("p", { class: "muted small" }, on ? "Enabled — a plain GET of “/” or “dir/” serves the index document; a miss serves the error document." : "Serve this bucket as a static site. Combine with a public-read policy (above) and a domain via GOSTORE_TLS_DOMAIN for HTTPS. MinIO needs a reverse proxy for this."),
+      el("div", { class: "row", style: "gap:10px;flex-wrap:wrap" },
+        el("label", { class: "muted small" }, "Index"), iIn,
+        el("label", { class: "muted small" }, "Error"), eIn,
+        el("button", { class: "primary sm", onclick: async () => {
+          const body = `<WebsiteConfiguration><IndexDocument><Suffix>${(iIn.value.trim() || "index.html")}</Suffix></IndexDocument>${eIn.value.trim() ? `<ErrorDocument><Key>${eIn.value.trim()}</Key></ErrorDocument>` : ""}</WebsiteConfiguration>`;
+          try { await must(await api("PUT", "/" + b, { query: { website: "" }, contentType: "application/xml", body })); toast("Website hosting enabled", "ok"); render(); } catch (e) { toast(e.message, "err"); }
+        } }, on ? "Update" : "Enable"),
+        on ? el("button", { class: "ghost sm", onclick: async () => {
+          try { await api("DELETE", "/" + b, { query: { website: "" } }); toast("Website hosting disabled", "ok"); render(); } catch (e) { toast(e.message, "err"); }
+        } }, "Disable") : null));
+  }
+
   // --- Danger zone ---
   v.append(el("h3", { style: "margin:28px 0 8px;font-size:15px;color:var(--red,#c0392b)" }, "Danger zone"));
   v.append(el("div", { class: "toolbar" }, el("button", { class: "danger sm", onclick: async () => {
@@ -1350,6 +1373,7 @@ const putUrl = await getSignedUrl(s3, new PutObjectCommand({ Bucket: "b", Key: "
       ["Get/Put/DeleteBucketLifecycleConfiguration", "Expiration, NoncurrentVersionExpiration, AbortIncompleteMultipartUpload"],
       ["Get/Put/DeleteBucketReplication", "native JSON shape (not the AWS XML)"],
       ["Get/PutBucketNotificationConfiguration", "webhook targets, native JSON"],
+      ["Get/Put/DeleteBucketWebsite", "static-site hosting: <code>?website</code> with IndexDocument/ErrorDocument; a query-less GET of <code>/</code> or <code>dir/</code> then serves the index, a miss the error doc. Pairs with a public-read policy + <code>GOSTORE_TLS_DOMAIN</code> for HTTPS — no reverse proxy."],
     ]));
     c.append(el("h3", {}, "Object"));
     c.append(TBL(["Operation", "Notes"], [
