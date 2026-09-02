@@ -1119,6 +1119,37 @@ async function viewMonitoring(v) {
   tile("Access keys", j.users + (j.serviceAccounts ? " + " + j.serviceAccounts + " svc" : "")); tile("Policies", j.policies); tile("Region", j.region);
   v.append(tiles);
 
+  // --- Data health ---
+  {
+    const dh = el("div", { class: "card", style: "margin:20px 0" });
+    dh.append(el("div", { class: "row", style: "justify-content:space-between;align-items:center" },
+      el("h3", { style: "margin:0;font-size:15px" }, "Data health"),
+      el("div", { class: "row", style: "gap:8px" },
+        el("button", { class: "ghost sm", onclick: async () => { try { await must(await api("POST", "/gostore/admin/v1/scrub")); toast("Deep scrub started", "ok"); setTimeout(render, 800); } catch (e) { toast(e.message, "err"); } } }, "Run deep scrub"),
+        el("button", { class: "ghost sm", onclick: async () => { const r = await (await api("GET", "/gostore/admin/v1/audit/verify")).json(); toast(r.intact ? `Audit chain intact (${r.entries} entries)` : `AUDIT CHAIN BROKEN at seq ${r.brokenAtSeq}`, r.intact ? "ok" : "err"); } }, "Verify audit log"))));
+    const grid = el("div", { class: "grid stat-tiles" });
+    const cell = (k, val, warn) => grid.append(el("div", { class: "tile" }, el("div", { class: "k" }, k), el("div", { class: "v", style: warn ? "color:var(--red,#c0392b)" : "" }, String(val))));
+    let metricsText = "";
+    try { metricsText = await (await fetch(location.origin + "/gostore/metrics")).text(); } catch {}
+    const mv = (re) => { const m = metricsText.match(re); return m ? m[1] : "0"; };
+    let scrub = null; try { scrub = await (await api("GET", "/gostore/admin/v1/scrub")).json(); } catch {}
+    if (scrub) {
+      cell("Deep scrub", scrub.running ? `running — ${scrub.objectsScanned} scanned` : (scrub.neverRun ? "never run" : "idle"));
+      cell("Objects repaired (last scrub)", scrub.objectsRepaired ?? 0);
+      cell("Unrecoverable", scrub.unrecoverable ?? 0, (scrub.unrecoverable ?? 0) > 0);
+    }
+    const integ = mv(/gostore_integrity_failures_total (\d+)/);
+    cell("Integrity failures", integ, +integ > 0);
+    cell("Read-repairs queued", mv(/gostore_read_repair_queued_total (\d+)/));
+    cell("Heal ok / error", mv(/gostore_heal_objects_total\{result="ok"\} (\d+)/) + " / " + mv(/gostore_heal_objects_total\{result="error"\} (\d+)/));
+    cell("Read-only", mv(/gostore_read_only (\d+)/) === "1" ? "YES" : "no", mv(/gostore_read_only (\d+)/) === "1");
+    let cl = null; try { cl = await (await api("GET", "/gostore/admin/v1/cluster")).json(); } catch {}
+    if (cl && cl.peersTotal) cell("Peers up", `${cl.peersUp} / ${cl.peersTotal}`, cl.peersUp < cl.peersTotal);
+    dh.append(grid);
+    dh.append(el("p", { class: "muted small" }, "Deep scrub verifies every shard's bitrot hash on a weekly cadence; the audit log is hash-chained so any edit is detectable. Neither is something MinIO's community edition surfaces."));
+    v.append(dh);
+  }
+
   let du = null;
   try { du = await (await api("GET", "/gostore/admin/v1/datausage")).json(); } catch {}
   if (du && du.buckets && Object.keys(du.buckets).length) {
@@ -1607,6 +1638,8 @@ new PutObjectCommand({ Bucket: "b", Key: "k", Body: buf, ServerSideEncryption: "
       ["POST /gostore/admin/v1/scrub", "—", "force a full deep scrub now (verify + repair every object)"],
       ["GET/POST /gostore/admin/v1/readonly", "<code>{enabled:bool}</code>", "read-only mode — reject every write with <code>503 ServerReadOnly</code> while still serving reads. Entered automatically when write quorum is impossible (auto-clears); a manual hold does not."],
       ["GET /gostore/admin/v1/cluster", "—", "per-peer up/down as seen from this node (circuit-breaker view, kept fresh by a 15s monitor) + backend health"],
+      ["GET /gostore/admin/v1/audit?limit=N&after=SEQ", "—", "tamper-evident audit log: every successful mutation as a hash-chained entry, also written to <code>&lt;vol0&gt;/.gostore.sys/audit/audit-YYYYMMDD.jsonl</code>"],
+      ["GET /gostore/admin/v1/audit/verify", "—", "walk the chain; reports <code>{entries, intact, brokenAtSeq}</code> — any edited or removed entry breaks it"],
       ["GET /gostore/admin/v1/datausage", "—", "per-bucket object counts &amp; byte totals from the last scan"],
       ["GET /gostore/admin/v1/whoami", "—", "<b>any authenticated key</b>: your identity, effective policies, admin?"],
       ["POST /gostore/admin/v1/users/rotate-secret", "<code>{accessKey, secretKey?}</code>", "give an existing user a fresh secret (old one dies immediately)"],

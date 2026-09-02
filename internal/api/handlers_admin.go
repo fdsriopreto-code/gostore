@@ -65,6 +65,10 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusAccepted, map[string]any{"started": true})
 	case path == "readonly":
 		s.handleAdminReadOnly(w, r)
+	case path == "audit" && r.Method == http.MethodGet:
+		s.handleAdminAudit(w, r)
+	case path == "audit/verify" && r.Method == http.MethodGet:
+		s.handleAdminAuditVerify(w, r)
 	case path == "cluster" && r.Method == http.MethodGet:
 		peers := cluster.PeerHealth()
 		up := 0

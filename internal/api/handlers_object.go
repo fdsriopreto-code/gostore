@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -80,8 +81,23 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, bucket,
 		}
 	}
 
-	oi, err := s.obj.PutObject(r.Context(), bucket, key, object.NewPutObjReader(r.Body, size, size), opts)
+	// Additional checksum (x-amz-checksum-<algo>): verify inline as the body
+	// streams; a mismatch aborts the write.
+	body := io.Reader(r.Body)
+	if algo, want := checksumFromHeaders(r.Header); algo != "" {
+		body = newVerifyingReader(r.Body, algo, want)
+		// Stored under an x-amz-meta- key so both backends keep it; echoed as
+		// x-amz-checksum-<algo> on read (see writeObjectHeaders).
+		opts.UserDefined["x-amz-meta-checksum-"+algo] = want
+	}
+
+	oi, err := s.obj.PutObject(r.Context(), bucket, key, object.NewPutObjReader(body, size, size), opts)
 	if err != nil {
+		var ce *checksumError
+		if errors.As(err, &ce) {
+			writeErrorResponse(w, r, ErrBadDigest, "/"+bucket+"/"+key)
+			return
+		}
 		writeErrorResponse(w, r, toAPIError(err), "/"+bucket+"/"+key)
 		return
 	}
@@ -326,6 +342,13 @@ func writeObjectHeaders(w http.ResponseWriter, oi object.ObjectInfo, region stri
 	for k, v := range oi.UserDefined {
 		lk := strings.ToLower(k)
 		if lk == "content-type" || lk == "content-encoding" || lk == "etag" {
+			continue
+		}
+		// Additional checksum: stored as (x-amz-meta-)checksum-<algo>, echoed
+		// as the real x-amz-checksum-<algo> header + x-amz-checksum-type.
+		if base := strings.TrimPrefix(strings.TrimPrefix(lk, "x-amz-meta-"), "x-amz-"); strings.HasPrefix(base, "checksum-") {
+			h.Set("x-amz-"+base, v)
+			h.Set("x-amz-checksum-type", "FULL_OBJECT")
 			continue
 		}
 		if lk == "x-amz-server-side-encryption" {

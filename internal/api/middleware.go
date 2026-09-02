@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/lojadopocket/gostore/internal/logger"
@@ -37,8 +38,10 @@ type statusRecorder struct {
 	http.ResponseWriter
 	status    int
 	bytes     int
-	accessKey string // filled by handleS3 once the caller is known
-	s3action  string // filled by handleS3 once the request is parsed
+	accessKey string    // filled by handleS3 once the caller is known
+	s3action  string    // filled by handleS3 once the request is parsed
+	start     time.Time // request-received instant
+	authAt    time.Time // instant auth finished
 }
 
 func (s *statusRecorder) WriteHeader(code int) {
@@ -96,7 +99,7 @@ func withRecover(next http.Handler) http.Handler {
 func withAccessLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		rec := &statusRecorder{ResponseWriter: w}
+		rec := &statusRecorder{ResponseWriter: w, start: start}
 		next.ServeHTTP(rec, r)
 		dur := time.Since(start)
 		inBytes := r.ContentLength
@@ -112,7 +115,19 @@ func withAccessLog(next http.Handler) http.Handler {
 				S3Action: rec.s3action,
 				Err:      rec.Header().Get("x-gostore-error"),
 				Cache:    rec.Header().Get("x-gostore-cache"),
+				AuthMS:   authMillis(rec),
 			})
+			// Tamper-evident audit: only successful mutations, and never the
+			// admin audit endpoints themselves.
+			if auditL != nil && rec.status < 400 && isMutatingRequest(r, r.URL.Query()) &&
+				!strings.Contains(r.URL.Path, "/gostore/admin/v1/audit") {
+				b, k := splitBucketKey(r.URL.Path)
+				auditL.record(auditEntry{
+					Time: start.UTC(), Method: r.Method, Path: r.URL.Path,
+					Bucket: b, Key: k, Action: rec.s3action, Status: rec.status,
+					Access: rec.accessKey, IP: clientIP(r), ReqID: requestIDFrom(r),
+				})
+			}
 		}
 		logger.Info("s3 request",
 			"method", r.Method,
@@ -162,3 +177,12 @@ func (b *deadlineBody) Read(p []byte) (int, error) {
 	return b.rc.Read(p)
 }
 func (b *deadlineBody) Close() error { return b.rc.Close() }
+
+// authMillis is the time spent authenticating (0 if handleS3 never stamped it,
+// e.g. a health or console request).
+func authMillis(rec *statusRecorder) int64 {
+	if rec.authAt.IsZero() || rec.start.IsZero() {
+		return 0
+	}
+	return rec.authAt.Sub(rec.start).Milliseconds()
+}

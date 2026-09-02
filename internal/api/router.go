@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/lojadopocket/gostore/internal/bucketcfg"
 	"github.com/lojadopocket/gostore/internal/config"
@@ -53,6 +54,11 @@ func NewServer(cfg config.Config, obj object.Layer, im *iam.Manager, bc *bucketc
 		ocache:   newObjCache(),
 		adm:      newAdmissionControl(),
 	}
+	vol0 := ""
+	if len(cfg.Volumes) > 0 {
+		vol0 = cfg.Volumes[0]
+	}
+	auditL = newAuditLog(vol0)
 	go s.watchQuorum(context.Background())
 	if v := strings.TrimSpace(os.Getenv("GOSTORE_DOMAIN")); v != "" {
 		for _, d := range strings.Split(v, ",") {
@@ -136,6 +142,7 @@ func (s *Server) handleS3(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(context.WithValue(r.Context(), ctxKeyAccessKey{}, accessKey))
 	if sr, ok := w.(*statusRecorder); ok {
 		sr.accessKey = accessKey
+		sr.authAt = time.Now()
 	}
 
 	if s.rl != nil {
