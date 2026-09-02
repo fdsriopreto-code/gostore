@@ -132,10 +132,11 @@ async function uploadMultipart(path, file, onProgress) {
     throw e;
   }
 }
-async function presignGet(path, expires = 3600) {
+async function presignGet(path, expires = 3600, extraQuery = {}) {
   const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, "");
   const ds = amzDate.slice(0, 8), scope = `${ds}/${REGION}/s3/aws4_request`;
   const q = {
+    ...extraQuery,
     "X-Amz-Algorithm": "AWS4-HMAC-SHA256", "X-Amz-Credential": `${session.ak}/${scope}`,
     "X-Amz-Date": amzDate, "X-Amz-Expires": String(expires), "X-Amz-SignedHeaders": "host",
   };
@@ -336,6 +337,7 @@ const DOC_GROUPS = ["Get started", "Access control", "Data management", "Referen
 let lastConsoleRoute = "dashboard";
 
 async function render() {
+  if (thumbObs) { thumbObs.disconnect(); thumbObs = null; }
   renderNav();
   $("#sidenav").classList.remove("open");
   const v = $("#view");
@@ -471,6 +473,33 @@ async function viewBucket(v, b) {
 }
 const linkEl = (t, fn) => { const a = el("a", {}, t); a.onclick = fn; return a; };
 
+// Lazy image thumbnails in the object listing: the server renders a small
+// JPEG via GET /bucket/key?preview; an IntersectionObserver only asks for the
+// ones that scroll into view.
+const THUMB_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp"]);
+let thumbObs = null;
+function nameCell(bucket, key, nm) {
+  const ext = (nm.split(".").pop() || "").toLowerCase();
+  if (!THUMB_EXT.has(ext)) return el("div", { class: "nm" }, ic(ICON.file), el("span", {}, nm));
+  const holder = el("span", { class: "thumb" }, ic(ICON.file));
+  holder.dataset.bucket = bucket; holder.dataset.key = key;
+  if (!thumbObs) {
+    thumbObs = new IntersectionObserver((ents) => {
+      for (const e of ents) {
+        if (!e.isIntersecting) continue;
+        const h = e.target; thumbObs.unobserve(h);
+        presignGet(h.dataset.bucket + "/" + h.dataset.key, 600, { preview: "64" }).then((u) => {
+          const img = new Image();
+          img.onload = () => { h.innerHTML = ""; h.append(img); };
+          img.src = u;
+        }).catch(() => {});
+      }
+    }, { rootMargin: "300px" });
+  }
+  thumbObs.observe(holder);
+  return el("div", { class: "nm" }, holder, el("span", {}, nm));
+}
+
 let bucketPrefix = "";
 async function bucketObjects(v, b) {
   const fi = el("input", { type: "file", multiple: "true", style: "display:none" });
@@ -527,7 +556,7 @@ async function bucketObjects(v, b) {
     chk.dataset.key = o.key;
     tbody.append(el("tr", { class: "clk", "data-name": nm.toLowerCase(), onclick: () => objectDrawer(b, o) },
       el("td", {}, chk),
-      el("td", {}, el("div", { class: "nm" }, ic(ICON.file), el("span", {}, nm))),
+      el("td", {}, nameCell(b, o.key, nm)),
       el("td", { class: "muted" }, relTime(o.lm)),
       el("td", { class: "num" }, fmtSize(o.size)),
       el("td", { class: "act" },
@@ -636,7 +665,12 @@ async function objectDrawer(b, o) {
       c.innerHTML = "";
       let node;
       if (V.includes(ext)) node = el("video", { src: url, controls: "", preload: "metadata", style: "width:100%;border-radius:var(--r2);background:#000;max-height:70vh" });
-      else if (I.includes(ext)) node = el("img", { src: url, style: "max-width:100%;border-radius:var(--r2)" });
+      else if (I.includes(ext)) {
+        // scaled server-side for non-vector formats so a huge photo shows fast
+        const raster = ["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp"].includes(ext);
+        const isrc = raster ? await presignGet(b + "/" + o.key, 3600, { preview: "1024" }) : url;
+        node = el("img", { src: isrc, style: "max-width:100%;border-radius:var(--r2)" });
+      }
       else if (A.includes(ext)) node = el("audio", { src: url, controls: "", style: "width:100%" });
       else if (ext === "pdf") node = el("iframe", { src: url, style: "width:100%;height:70vh;border:1px solid var(--border);border-radius:var(--r2)" });
       else if (T.includes(ext)) {
@@ -1129,6 +1163,7 @@ const putUrl = await getSignedUrl(s3, new PutObjectCommand({ Bucket: "b", Key: "
       ["CopyObject / UploadPartCopy", "<code>x-amz-metadata-directive</code>"],
       ["ListObjectsV2 / ListObjects / ListObjectVersions", "prefix, delimiter, pagination"],
       ["CreateMultipartUpload … CompleteMultipartUpload", "full multipart, min part 5 MiB"],
+      ["GET /{bucket}/{key}?preview[=N]", "gostore extra: server-scaled JPEG thumbnail of an image object (longest side N px, default 480). Needs <code>s3:GetObject</code>."],
       ["Get/Put/DeleteObjectTagging", ""],
       ["Get/PutObjectRetention, Get/PutObjectLegalHold", "GOVERNANCE / COMPLIANCE / legal hold"],
     ]));

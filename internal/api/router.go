@@ -255,6 +255,10 @@ func (s *Server) dispatchObject(w http.ResponseWriter, r *http.Request, bucket, 
 			s.handleListObjectParts(w, r, bucket, object)
 			return
 		}
+		if has("preview") {
+			s.handleObjectPreview(w, r, bucket, object)
+			return
+		}
 		if has("tagging") {
 			s.handleGetObjectTagging(w, r, bucket, object)
 			return

@@ -9,6 +9,10 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
+	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -828,4 +832,47 @@ func TestPrometheusMetrics(t *testing.T) {
 			t.Fatalf("metrics missing %q in:\n%s", want, body)
 		}
 	}
+}
+
+func TestObjectPreviewThumbnail(t *testing.T) {
+	srv := newTestServer(t)
+	if r := do(t, srv, http.MethodPut, "/imgs", []byte{}, nil); r.StatusCode != 200 {
+		t.Fatalf("mb: %d", r.StatusCode)
+	}
+	// a 300x200 PNG
+	img := image.NewRGBA(image.Rect(0, 0, 300, 200))
+	for y := 0; y < 200; y++ {
+		for x := 0; x < 300; x++ {
+			img.Set(x, y, color.RGBA{uint8(x), uint8(y), 128, 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	if r := do(t, srv, http.MethodPut, "/imgs/p.png", buf.Bytes(), map[string]string{"Content-Type": "image/png"}); r.StatusCode != 200 {
+		t.Fatalf("put png: %d %s", r.StatusCode, readBody(t, r))
+	}
+
+	resp := do(t, srv, http.MethodGet, "/imgs/p.png?preview=64", nil, nil)
+	body := func() []byte { b, _ := io.ReadAll(resp.Body); resp.Body.Close(); return b }()
+	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "image/jpeg" {
+		t.Fatalf("preview: %d %s", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	tn, err := jpeg.Decode(bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("preview not decodable JPEG: %v", err)
+	}
+	b := tn.Bounds()
+	if b.Dx() != 64 || b.Dy() != 43 { // 300x200 scaled so longest side = 64
+		t.Fatalf("thumb size %dx%d, want 64x43", b.Dx(), b.Dy())
+	}
+
+	// a non-image gets 501 (NotImplemented) rather than a broken JPEG
+	_ = do(t, srv, http.MethodPut, "/imgs/note.txt", []byte("hello"), nil)
+	r2 := do(t, srv, http.MethodGet, "/imgs/note.txt?preview", nil, nil)
+	if r2.StatusCode == 200 {
+		t.Fatalf("preview of a text file should not be 200")
+	}
+	r2.Body.Close()
 }
