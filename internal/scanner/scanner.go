@@ -25,6 +25,12 @@ type objectHealer interface {
 	HealObject(ctx context.Context, bucket, key string) error
 }
 
+// dedupGCer is implemented by the erasure backend when content-addressed
+// dedup is enabled: remove CAS blobs no object references.
+type dedupGCer interface {
+	GCDedup(ctx context.Context, grace time.Duration) (int, error)
+}
+
 // healSampleRate: 1-in-N objects are opportunistically healed per pass
 // (matches MinIO's data-scanner sampling idea).
 const healSampleRate = 128
@@ -187,6 +193,14 @@ func (s *Scanner) DeepScrub(ctx context.Context) {
 			token = li.NextContinuationToken
 		}
 	}
+	// Mark-and-sweep GC of unreferenced dedup blobs (grace window guards a
+	// PUT that installed a blob but hasn't committed its xl.meta yet).
+	if gc, ok := s.obj.(dedupGCer); ok && ctx.Err() == nil {
+		if n, err := gc.GCDedup(ctx, time.Hour); err == nil && n > 0 {
+			logger.Info("dedup GC removed unreferenced blobs", "count", n)
+		}
+	}
+
 	st.Running, st.FinishedAt, st.Bucket = false, time.Now().UTC(), ""
 	s.scrub.Store(st)
 	logger.Info("deep scrub complete",

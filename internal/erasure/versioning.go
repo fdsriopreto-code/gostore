@@ -156,7 +156,7 @@ func (p *Pool) putObjectVersionedOn(ctx context.Context, set *Set, bucket, key s
 			}
 		}
 	}
-	meta, err := set.putObjectSSE(ctx, bucket, key, []partSource{{Number: 1, Size: data.Size(), Reader: data}}, um, sp)
+	meta, err := set.putObjectSSE(ctx, bucket, key, []partSource{{Number: 1, Size: data.Size(), Reader: data}}, um, sp, false)
 	if err != nil {
 		return object.ObjectInfo{}, mapErr(err)
 	}

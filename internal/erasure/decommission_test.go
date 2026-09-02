@@ -156,7 +156,7 @@ func TestRebalanceRelocatesMisplacedObject(t *testing.T) {
 	wrong := p.sets[0]
 	if _, err := wrong.putObject(ctx(), "rebuck", key, []partSource{
 		{Number: 1, Size: int64(len(body)), Reader: bytes.NewReader(body)},
-	}, userMeta{contentType: "application/octet-stream"}); err != nil {
+	}, userMeta{contentType: "application/octet-stream"}, false); err != nil {
 		t.Fatal(err)
 	}
 

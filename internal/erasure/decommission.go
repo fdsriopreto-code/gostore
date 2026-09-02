@@ -399,7 +399,7 @@ func (p *Pool) copyCurrent(ctx context.Context, bucket, key string, from, to *Se
 		}
 	}
 	meta, err := to.putObjectSSE(ctx, bucket, key,
-		[]partSource{{Number: 1, Size: size, Reader: rc}}, userMetaFromMeta(m), sp)
+		[]partSource{{Number: 1, Size: size, Reader: rc}}, userMetaFromMeta(m), sp, false)
 	if err != nil {
 		return err
 	}

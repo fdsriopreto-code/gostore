@@ -178,6 +178,8 @@ func (s *Server) adminInfo(w http.ResponseWriter, r *http.Request) {
 		info["dataInitialized"] = d.FormatCreated()
 		info["volumeWasEmptyAtBoot"] = d.FreshlyFormatted()
 	}
+	info["dedup"] = erasure.DedupEnabled()
+	info["readOnly"] = s.ro.on()
 	writeJSON(w, http.StatusOK, info)
 }
 

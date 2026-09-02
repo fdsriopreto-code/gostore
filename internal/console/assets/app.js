@@ -1742,6 +1742,7 @@ GOSTORE_CLUSTER_SELF=http://node2:9000 gostore server \\
       ["GOSTORE_ALLOW_FORMAT_MISMATCH", "0", "set <code>1</code> to start even when a disk's on-disk position (set/disk index) disagrees with the configured order — only during a deliberate topology migration"],
       ["GOSTORE_MAX_INFLIGHT_BYTES", "536870912", "cap on total request-body bytes in flight for writes; over it new writes get <code>503 SlowDown</code>"],
       ["GOSTORE_MEM_LIMIT_BYTES", "0", "when set, heap-in-use above this sheds new writes with 503 for ~5s (memory backpressure); <code>0</code> disables"],
+      ["GOSTORE_DEDUP", "0", "set <code>1</code> for content-addressed dedup: byte-identical objects (erasure, non-SSE) share one set of shard files under <code>.gostore.sys/cas/&lt;sha256&gt;/</code>; unreferenced blobs are removed by a mark-and-sweep GC on the deep-scrub cadence. Server-side copies of identical content become near-free."],
     ]));
     c.append(el("h3", {}, "Built-in HTTPS (Let's Encrypt)"));
     c.append(P("Set <code>GOSTORE_TLS_DOMAIN</code> and gostore obtains and renews its own certificate — no nginx/Caddy in front. Point <code>GOSTORE_ADDRESS</code> at <code>:443</code>, publish port 80 as well (ACME HTTP-01 challenge + a redirect to https). MinIO can't do this."));

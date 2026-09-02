@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -197,18 +198,27 @@ type partSource struct {
 // putObject erasure-codes the given parts into bucket/key and writes an
 // identical xl.meta to every disk, all under a per-op staging dir that is
 // atomically renamed into place. Returns the committed metadata.
-func (s *Set) putObject(ctx context.Context, bucket, key string, parts []partSource, um userMeta) (*XLMeta, error) {
-	return s.putObjectSSE(ctx, bucket, key, parts, um, nil)
+func (s *Set) putObject(ctx context.Context, bucket, key string, parts []partSource, um userMeta, dedup bool) (*XLMeta, error) {
+	return s.putObjectSSE(ctx, bucket, key, parts, um, nil, dedup)
 }
 
 // putObjectSSE is putObject with optional SSE-S3 encryption (single part
 // only). When sp != nil the part reader is encrypted before erasure coding
-// and the metadata records the plaintext md5 + size.
-func (s *Set) putObjectSSE(ctx context.Context, bucket, key string, parts []partSource, um userMeta, sp *sseParams) (*XLMeta, error) {
+// and the metadata records the plaintext md5 + size. When dedup is set (and
+// not SSE / not inline) the shard files are content-addressed and shared.
+func (s *Set) putObjectSSE(ctx context.Context, bucket, key string, parts []partSource, um userMeta, sp *sseParams, dedup bool) (*XLMeta, error) {
 	staging := path.Join(tmpPrefix, storage.NewID())
 	defer s.cleanupStaging(ctx, staging)
 
+	dedup = dedup && dedupEnabled && sp == nil
+	var objSHA = sha256.New()
+
+	// A deduped blob is shared by many keys, so it can't use a key-derived
+	// shard distribution — every referrer must agree on it. Use identity.
 	dist := buildDistribution(key, s.n())
+	if dedup {
+		dist = identityDist(s.n())
+	}
 	meta := &XLMeta{
 		Version: xlMetaVersion,
 		ModTime: time.Now().UTC(),
@@ -239,6 +249,9 @@ func (s *Set) putObjectSSE(ctx context.Context, bucket, key string, parts []part
 
 	for _, ps := range parts {
 		reader := ps.Reader
+		if dedup {
+			reader = io.TeeReader(reader, objSHA) // hash the plaintext for the CAS key
+		}
 		if sp != nil {
 			reader = sp.wrapForEncrypt(reader)
 		}
@@ -276,6 +289,20 @@ func (s *Set) putObjectSSE(ctx context.Context, bucket, key string, parts []part
 		meta.PlainSize = sp.plainLen
 		meta.EncDEK = sp.encDEK
 		meta.NoncePrefix = hex.EncodeToString(sp.prefix)
+	}
+
+	// Dedup: point this object at a shared CAS blob instead of its own shards.
+	if dedup {
+		h := hex.EncodeToString(objSHA.Sum(nil))
+		if s.casExists(ctx, h) {
+			s.cleanupStaging(ctx, staging) // identical bytes already stored
+		} else if !s.installCAS(ctx, staging, h, total, len(parts)) {
+			return nil, ErrWriteQuorum
+		}
+		meta.DataRef = h
+		staging2 := path.Join(tmpPrefix, storage.NewID())
+		defer s.cleanupStaging(ctx, staging2)
+		return s.commitMeta(ctx, staging2, bucket, key, meta, -1)
 	}
 
 	m, err := s.commitMeta(ctx, staging, bucket, key, meta, -1)
@@ -635,7 +662,8 @@ func (s *Set) readPart(ctx context.Context, bucket, key string, meta *XLMeta, pm
 	firstStripe := *skip / stripeLen
 	shardOffset := firstStripe * stride
 
-	readers, closers := s.openShards(ctx, bucket, key, pm.Number, shardOffset)
+	dataBucket, dataKey := meta.dataLoc(bucket, key)
+	readers, closers := s.openShards(ctx, dataBucket, dataKey, pm.Number, shardOffset)
 	defer func() {
 		for _, c := range closers {
 			if c != nil {

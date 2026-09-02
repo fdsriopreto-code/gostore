@@ -24,6 +24,13 @@ type XLMeta struct {
 	// (fencing against a stale writer whose lock expired).
 	Revision uint64 `json:"rev,omitempty"`
 
+	// DataRef, when set, is the sha256 of the object's plaintext. The shard
+	// files live once under .gostore.sys/cas/<DataRef>/ and are shared by
+	// every object with identical content (inline dedup). This xl.meta holds
+	// no per-object shards; a mark-and-sweep GC removes an unreferenced CAS
+	// blob after a grace period.
+	DataRef string `json:"dataRef,omitempty"`
+
 	Size    int64     `json:"size"`
 	ModTime time.Time `json:"modTime"`
 	ETag    string    `json:"etag"`
@@ -90,6 +97,16 @@ type PartMeta struct {
 }
 
 func (m *XLMeta) marshal() ([]byte, error) { return json.Marshal(m) }
+
+// dataLoc returns the (bucket, dir) the object's shard files actually live
+// under: the object's own path normally, or the shared CAS blob when the
+// object is deduped.
+func (m *XLMeta) dataLoc(bucket, key string) (string, string) {
+	if m.DataRef != "" {
+		return "", casDir(m.DataRef)
+	}
+	return bucket, key
+}
 
 func unmarshalXLMeta(b []byte) (*XLMeta, error) {
 	var m XLMeta

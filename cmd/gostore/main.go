@@ -154,6 +154,7 @@ func runServer(args []string) error {
 		applyListCacheTTL()
 		applyWalkKeysMax()
 		applyDirSync()
+		applyDedup()
 		set, err := erasure.NewSet(spec.Disks)
 		if err != nil {
 			return fmt.Errorf("cluster erasure set: %w", err)
@@ -204,6 +205,7 @@ func runServer(args []string) error {
 	applyListCacheTTL()
 	applyWalkKeysMax()
 	applyDirSync()
+	applyDedup()
 
 	if cfg.SingleDisk() {
 		backend, err := fsbackend.New(cfg.VolumeGroups[0][0])
@@ -501,6 +503,16 @@ func applyDirSync() {
 	case "0", "false", "no", "off":
 		storage.SetDirSync(false)
 		logger.Warn("directory fsync disabled (GOSTORE_FSYNC=0) — the last write before a power loss may be lost")
+	}
+}
+
+// applyDedup honours GOSTORE_DEDUP — content-addressed shard sharing for
+// byte-identical objects (erasure backend, non-SSE). Off by default.
+func applyDedup() {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("GOSTORE_DEDUP"))) {
+	case "1", "true", "yes", "on":
+		erasure.SetDedup(true)
+		logger.Info("content-addressed dedup enabled (GOSTORE_DEDUP)")
 	}
 }
 

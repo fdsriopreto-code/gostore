@@ -164,11 +164,14 @@ func (s *Set) healObject(ctx context.Context, bucket, key string) (int, int, err
 	fullShard := m.Erasure.BlockSize
 	shardFixed := 0
 
+	// Deduped objects share their shard files under the CAS namespace.
+	dataBucket, dataKey := m.dataLoc(bucket, key)
+
 	for pi, pm := range m.Parts {
-		partPath := path.Join(key, partFile(pm.Number))
+		partPath := path.Join(dataKey, partFile(pm.Number))
 		var bad []int
 		for di := range s.disks {
-			if !s.shardIntact(ctx, s.disks[di], bucket, partPath, pi, di, pm, m) {
+			if !s.shardIntact(ctx, s.disks[di], dataBucket, partPath, pi, di, pm, m) {
 				bad = append(bad, di)
 			}
 		}
@@ -182,7 +185,7 @@ func (s *Set) healObject(ctx context.Context, bucket, key string) (int, int, err
 			return metaFixed, shardFixed, nil
 		}
 		for _, di := range bad {
-			if s.rebuildShard(ctx, bucket, partPath, pi, di, pm, m, dist, fullShard) == nil {
+			if s.rebuildShard(ctx, dataBucket, partPath, pi, di, pm, m, dist, fullShard) == nil {
 				shardFixed++
 			}
 		}

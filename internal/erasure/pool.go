@@ -238,7 +238,7 @@ func (p *Pool) PutObject(ctx context.Context, bucket, key string, data *object.P
 	}
 	meta, err := p.setFor(key).putObjectSSE(ctx, bucket, key, []partSource{
 		{Number: 1, Size: data.Size(), Reader: data},
-	}, toUserMeta(opts), sp)
+	}, toUserMeta(opts), sp, dedupEnabled)
 	if err != nil {
 		return object.ObjectInfo{}, mapErr(err)
 	}

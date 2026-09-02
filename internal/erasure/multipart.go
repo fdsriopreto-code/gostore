@@ -83,7 +83,7 @@ func (p *Pool) PutObjectPart(ctx context.Context, bucket, key, uploadID string, 
 	}
 	meta, err := set.putObject(ctx, "", mpPartKey(uploadID, partID), []partSource{
 		{Number: 1, Size: data.Size(), Reader: data},
-	}, userMeta{})
+	}, userMeta{}, false)
 	if err != nil {
 		return object.PartInfo{}, mapErr(err)
 	}
@@ -308,7 +308,7 @@ func (p *Pool) CompleteMultipartUpload(ctx context.Context, bucket, key, uploadI
 	meta, err := set.putObject(ctx, bucket, key, sources, userMeta{
 		contentType: ui.ContentType, contentEnc: ui.ContentEnc,
 		user: ui.UserMeta, tags: ui.UserTags,
-	})
+	}, dedupEnabled)
 	for _, r := range readers {
 		_ = r.Close()
 	}
