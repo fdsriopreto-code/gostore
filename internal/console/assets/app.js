@@ -201,7 +201,12 @@ function modal(title, hint, fields, onOK, okLabel = "Create") {
   ok.onclick = async () => {
     const v = {}; for (const k in inp) v[k] = inp[k].value.trim();
     ok.disabled = true;
-    try { await onOK(v); d.close(); } catch (e) { toast(e.message, "err"); } finally { ok.disabled = false; }
+    try {
+      // onOK may return false to keep the dialog open (e.g. it swapped in
+      // its own content like the credentials reveal).
+      const keepOpen = (await onOK(v)) === false;
+      if (!keepOpen) d.close();
+    } catch (e) { toast(e.message, "err"); ok.disabled = false; }
   };
   btns.append(ok); d.append(btns); d.showModal();
   setTimeout(() => d.querySelector("input,textarea,select")?.focus(), 30);
@@ -620,7 +625,10 @@ function credsModal(ak, sk, note) {
   };
   const done = el("button", { class: "primary" }, "Done");
   done.onclick = () => { d.close(); render(); };
-  btns.append(dl, done); d.append(btns); d.showModal();
+  btns.append(dl, done); d.append(btns);
+  // If it's already open (invoked from inside another modal's submit), just
+  // keep it open — calling showModal() twice throws.
+  if (!d.open) d.showModal();
 }
 
 async function viewKeys(v) {
@@ -636,6 +644,7 @@ async function viewKeys(v) {
     ], async (val) => {
       await must(await api("PUT", "/gostore/admin/v1/users", { contentType: "application/json", body: JSON.stringify({ accessKey: val.accessKey, secretKey: val.secretKey, policies: [val.policy] }) }));
       credsModal(val.accessKey, val.secretKey, "Policy: " + val.policy);
+      return false; // keep the dialog open — credsModal swapped its content in
     }) }, ic(ICON.plus), "Custom key"),
     el("button", { class: "primary", onclick: () => modal("Generate access key",
       "A random access key ID + secret are generated. The secret is shown once — copy or download it.", [
@@ -644,6 +653,7 @@ async function viewKeys(v) {
       const ak = "gk" + randHex(9), sk = randHex(24);
       await must(await api("PUT", "/gostore/admin/v1/users", { contentType: "application/json", body: JSON.stringify({ accessKey: ak, secretKey: sk, policies: [val.policy] }) }));
       credsModal(ak, sk, "Policy: " + val.policy + " · this key is persisted on the server.");
+      return false; // keep the dialog open — credsModal swapped its content in
     }, "Generate") }, ic(ICON.key), "Generate access key"),
   ]);
   const tb = el("tbody");
