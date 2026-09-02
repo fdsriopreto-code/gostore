@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/lojadopocket/gostore/internal/configstore"
 	"github.com/lojadopocket/gostore/internal/nslock"
@@ -24,6 +25,9 @@ type Pool struct {
 	mrf    *mrfQueue
 	lcache *listCache
 	ns     *nslock.Striped
+
+	bmu       sync.Mutex
+	bucketsOK map[string]time.Time // bucket -> last confirmed to exist
 
 	// pool layout: set indices that are being decommissioned. When empty
 	// (the common case) hasInactive is false and set placement is the plain
@@ -44,7 +48,7 @@ func NewPool(sets ...*Set) (*Pool, error) {
 	if len(sets) == 0 {
 		return nil, errors.New("erasure: no sets")
 	}
-	return &Pool{sets: sets, ns: nslock.New(), lcache: newListCache()}, nil
+	return &Pool{sets: sets, ns: nslock.New(), lcache: newListCache(), bucketsOK: map[string]time.Time{}}, nil
 }
 
 // FromDisks is the common case: build a single set (and pool) from n disks.
@@ -147,6 +151,9 @@ func (p *Pool) MakeBucket(ctx context.Context, bucket string, _ object.MakeBucke
 			return err
 		}
 	}
+	p.bmu.Lock()
+	p.bucketsOK[bucket] = time.Now()
+	p.bmu.Unlock()
 	return nil
 }
 
@@ -171,6 +178,10 @@ func (p *Pool) ListBuckets(ctx context.Context) ([]object.BucketInfo, error) {
 }
 
 func (p *Pool) DeleteBucket(ctx context.Context, bucket string, opts object.DeleteBucketOptions) error {
+	p.bmu.Lock()
+	delete(p.bucketsOK, bucket)
+	p.bmu.Unlock()
+	p.invalidateList(bucket)
 	for _, set := range p.sets {
 		if err := set.DeleteBucket(ctx, bucket, opts.Force); err != nil {
 			if errors.Is(err, storage.ErrVolumeNotEmpty) {
@@ -235,6 +246,10 @@ func (p *Pool) GetObjectInfo(ctx context.Context, bucket, key string, opts objec
 	if err := p.ensureBucket(ctx, bucket); err != nil {
 		return object.ObjectInfo{}, err
 	}
+	rlk := p.NewNSLock(bucket, key)
+	rc, _ := rlk.GetRLock(ctx, 0)
+	defer rlk.RUnlock(rc)
+
 	if opts.Versioned || opts.VersionSuspended || opts.VersionID != "" {
 		oi, err := p.statVersioned(ctx, bucket, key, opts.VersionID)
 		if err == nil || opts.VersionID != "" || !errors.Is(err, object.ErrObjectNotFound) {
@@ -371,13 +386,29 @@ func (p *Pool) CopyObject(ctx context.Context, srcBucket, srcObject, dstBucket, 
 
 // --- helpers -----------------------------------------------------
 
+const bucketExistTTL = 30 * time.Second
+
+// ensureBucket verifies the bucket exists. A positive result is cached for a
+// short TTL so the common case (many ops against a live bucket) doesn't fan
+// a StatVol out to every disk on every request. A local DeleteBucket evicts;
+// a bucket deleted on another node is still trusted for up to the TTL, after
+// which the op fails at the set layer anyway.
 func (p *Pool) ensureBucket(ctx context.Context, bucket string) error {
 	if !validBucketName(bucket) {
 		return object.ErrBucketNameInvalid
 	}
+	p.bmu.Lock()
+	fresh := time.Since(p.bucketsOK[bucket]) < bucketExistTTL
+	p.bmu.Unlock()
+	if fresh {
+		return nil
+	}
 	if _, err := p.sets[0].StatBucket(ctx, bucket); err != nil {
 		return object.BucketNotFound{Bucket: bucket}
 	}
+	p.bmu.Lock()
+	p.bucketsOK[bucket] = time.Now()
+	p.bmu.Unlock()
 	return nil
 }
 

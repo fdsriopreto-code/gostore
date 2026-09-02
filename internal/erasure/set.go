@@ -11,6 +11,7 @@ import (
 	"path"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/lojadopocket/gostore/internal/sse"
@@ -107,7 +108,12 @@ func (s *Set) DeleteBucket(ctx context.Context, bucket string, force bool) error
 	return ErrWriteQuorum
 }
 
+// statBucketCalls counts fan-out bucket-existence checks; the Pool's
+// positive cache should keep this near zero on a hot bucket. Test signal.
+var statBucketCalls atomic.Int64
+
 func (s *Set) StatBucket(ctx context.Context, bucket string) (storage.VolInfo, error) {
+	statBucketCalls.Add(1)
 	type res struct {
 		vi  storage.VolInfo
 		err error

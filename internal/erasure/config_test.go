@@ -2,11 +2,13 @@ package erasure
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path"
 	"testing"
 
 	"github.com/lojadopocket/gostore/internal/configstore"
+	"github.com/lojadopocket/gostore/internal/object"
 )
 
 func TestConfigStoreRoundTrip(t *testing.T) {
@@ -54,5 +56,25 @@ func TestConfigStoreMajorityWins(t *testing.T) {
 	}
 	if string(got) != "v2" {
 		t.Fatalf("majority-wins failed: got %s", got)
+	}
+}
+
+func TestBucketExistenceCache(t *testing.T) {
+	p, _ := newTestPool(t, 4)
+	if err := p.MakeBucket(ctx(), "cachebk", object.MakeBucketOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	statBucketCalls.Store(0)
+	for i := 0; i < 8; i++ {
+		put(t, p, "cachebk", fmt.Sprintf("k%d", i), []byte("x"))
+		_, _ = p.GetObjectInfo(ctx(), "cachebk", fmt.Sprintf("k%d", i), object.ObjectOptions{})
+	}
+	if n := statBucketCalls.Load(); n != 0 {
+		t.Fatalf("MakeBucket should seed the existence cache; got %d StatBucket fan-outs across 16 ops", n)
+	}
+	// deleting the bucket evicts the cache -> next op re-checks and 404s
+	_ = p.DeleteBucket(ctx(), "cachebk", object.DeleteBucketOptions{Force: true})
+	if _, err := p.GetObjectInfo(ctx(), "cachebk", "k0", object.ObjectOptions{}); err == nil {
+		t.Fatal("op on a deleted bucket should fail (cache evicted)")
 	}
 }
