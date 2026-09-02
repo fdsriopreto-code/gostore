@@ -183,6 +183,22 @@ func (s *Scanner) walkBucket(ctx context.Context, bucket string, rules []expRule
 		for _, o := range li.Objects {
 			bu.Objects++
 			bu.Bytes += o.Size
+
+			// Per-object TTL (gostore extension): a stored absolute-expiry
+			// metadata key, enforced here regardless of lifecycle rules.
+			if object.HasExpired(o.UserDefined, now) {
+				if _, err := s.obj.DeleteObject(ctx, bucket, o.Name, object.ObjectOptions{Versioned: true}); err != nil {
+					if !errors.Is(err, object.ErrObjectLocked) {
+						rep.Errors++
+					}
+				} else {
+					rep.ObjectsExpired++
+					bu.Objects--
+					bu.Bytes -= o.Size
+				}
+				continue
+			}
+
 			if s.healer != nil && s.shouldHeal(bucket, o.Name) {
 				err := s.healer.HealObject(ctx, bucket, o.Name)
 				metrics.HealResult(err == nil)

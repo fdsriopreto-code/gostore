@@ -369,3 +369,9 @@ persistência, service account herda+restringe; HTTP e2e — fluxo S3 assinado
 com SigV4, streaming chunked com cadeia de assinatura, bucket policy
 public-read (anon GET ok / anon PUT 403), object tagging. O signer SigV4 do
 console (Web Crypto) é validado ponta-a-ponta contra o servidor.
+
+## Licença
+
+Apache License 2.0 — veja [LICENSE](LICENSE). Uso comercial livre, sem
+copyleft de rede (ao contrário do AGPL do MinIO): você pode rodar, modificar
+e embarcar o gostore em produtos fechados sem obrigação de abrir seu código.

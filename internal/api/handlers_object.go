@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"mime"
 	"net/http"
@@ -38,6 +39,11 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, bucket,
 	opts.UserDefined = extractMetadata(r, key)
 	if v := r.Header.Get("x-amz-tagging"); v != "" {
 		opts.UserTags = v
+	}
+	// Per-object TTL (gostore extension): store an absolute expiry instant the
+	// scanner and GET path enforce — no bucket lifecycle rule needed.
+	if exp := parseExpiryDirective(r.Header.Get, time.Now()); !exp.IsZero() {
+		opts.UserDefined[expiryMetaKey] = exp.Format(time.RFC3339)
 	}
 	// Conditional writes (S3 / RFC 7232). CheckPrecondFn returns true to mean
 	// "precondition failed, abort with 412"; the backend only calls it when
@@ -103,6 +109,16 @@ func (s *Server) getOrHeadObject(w http.ResponseWriter, r *http.Request, bucket,
 	}
 	if oi.VersionID != "" {
 		w.Header().Set("x-amz-version-id", oi.VersionID)
+	}
+
+	// Per-object TTL: an expired object reads as gone and is deleted in the
+	// background (the scanner sweeps any the read path never revisits).
+	if objectHasExpired(oi.UserDefined, time.Now()) {
+		go func() {
+			_, _ = s.obj.DeleteObject(context.Background(), bucket, key, object.ObjectOptions{})
+		}()
+		writeErrorResponse(w, r, ErrNoSuchKey, res)
+		return
 	}
 
 	switch condStatus := evalGetConditionals(r, oi); condStatus {
