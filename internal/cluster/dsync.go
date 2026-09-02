@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/lojadopocket/gostore/internal/object"
@@ -33,9 +34,9 @@ const (
 // --- per-node lock table (the RPC server side) --------------------------
 
 type hold struct {
-	token     string
+	token     string // exclusive holder's token
 	exclusive bool
-	readers   int
+	readers   map[string]struct{} // shared holders' tokens
 	expiry    time.Time
 }
 
@@ -51,18 +52,18 @@ func (t *lockTable) acquire(res, token string, exclusive bool) bool {
 	defer t.mu.Unlock()
 	h := t.m[res]
 	if h != nil && time.Now().After(h.expiry) {
-		h = nil
+		h = nil // expired holder — the slot is free
 	}
 	if h == nil {
 		nh := &hold{token: token, exclusive: exclusive, expiry: time.Now().Add(lockTTL)}
 		if !exclusive {
-			nh.readers = 1
+			nh.readers = map[string]struct{}{token: {}}
 		}
 		t.m[res] = nh
 		return true
 	}
 	if exclusive || h.exclusive {
-		// same holder refreshing an exclusive lock is fine
+		// The same holder refreshing its own exclusive lock is fine.
 		if exclusive && h.exclusive && h.token == token {
 			h.expiry = time.Now().Add(lockTTL)
 			return true
@@ -70,7 +71,7 @@ func (t *lockTable) acquire(res, token string, exclusive bool) bool {
 		return false
 	}
 	// shared + shared
-	h.readers++
+	h.readers[token] = struct{}{}
 	h.expiry = time.Now().Add(lockTTL)
 	return true
 }
@@ -83,13 +84,23 @@ func (t *lockTable) release(res, token string, exclusive bool) {
 		return
 	}
 	if exclusive {
-		if h.token == token {
+		if h.exclusive && h.token == token {
 			delete(t.m, res)
 		}
 		return
 	}
-	h.readers--
-	if h.readers <= 0 {
+	// Shared unlock must name a current reader — otherwise a late runlock
+	// whose grant already expired (and whose slot may since have been taken by
+	// a *different* holder) would corrupt that holder's state or free its
+	// lock.
+	if h.exclusive {
+		return
+	}
+	if _, ok := h.readers[token]; !ok {
+		return
+	}
+	delete(h.readers, token)
+	if len(h.readers) == 0 {
 		delete(t.m, res)
 	}
 }
@@ -98,7 +109,14 @@ func (t *lockTable) refresh(res, token string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	h := t.m[res]
-	if h == nil || (h.exclusive && h.token != token) {
+	if h == nil {
+		return false
+	}
+	if h.exclusive {
+		if h.token != token {
+			return false
+		}
+	} else if _, ok := h.readers[token]; !ok {
 		return false
 	}
 	h.expiry = time.Now().Add(lockTTL)
@@ -217,14 +235,30 @@ func (l *distLock) GetRLock(ctx context.Context, timeout time.Duration) (context
 func (l *distLock) Unlock(context.Context)  { l.drop("unlock") }
 func (l *distLock) RUnlock(context.Context) { l.drop("runlock") }
 
+// tryAll sends op to every peer concurrently and returns the number that
+// answered yes. Sequential fan-out made a lock acquire cost N network round
+// trips and widened the unlocked window under contention.
 func (l *distLock) tryAll(op string) int {
-	grants := 0
-	for _, p := range l.c.peers {
-		if p.do(op, l.res, l.token) {
-			grants++
+	peers := l.c.peers
+	if len(peers) == 1 {
+		if peers[0].do(op, l.res, l.token) {
+			return 1
 		}
+		return 0
 	}
-	return grants
+	var grants int32
+	var wg sync.WaitGroup
+	wg.Add(len(peers))
+	for _, p := range peers {
+		go func(p *lockPeer) {
+			defer wg.Done()
+			if p.do(op, l.res, l.token) {
+				atomic.AddInt32(&grants, 1)
+			}
+		}(p)
+	}
+	wg.Wait()
+	return int(grants)
 }
 
 // grab acquires the lock, retrying with capped exponential backoff until it
