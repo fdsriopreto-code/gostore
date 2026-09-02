@@ -937,6 +937,20 @@ async function bucketSettings(v, b) {
       el("p", { class: "muted small" }, "Soft limit checked against the last background scan, so a burst can briefly overshoot. Writes past the limit get <code>403 QuotaExceeded</code>."));
   }
 
+  // compression at rest
+  {
+    let con = false;
+    try { con = (await (await api("GET", "/" + b, { query: { compression: "" } })).json()).enabled; } catch {}
+    const cbox = el("input", { type: "checkbox" }); cbox.checked = !!con;
+    sec("Compression at rest",
+      el("label", { class: "row", style: "gap:8px" }, cbox,
+        el("span", {}, "zstd-compress new objects on disk (erasure, non-SSE, single-part; already-compressed types are skipped)")),
+      el("button", { class: "primary sm", style: "margin-top:8px", onclick: async () => {
+        try { await must(await api("PUT", "/" + b, { query: { compression: "" }, contentType: "application/json", body: JSON.stringify({ enabled: cbox.checked }) })); toast("Compression " + (cbox.checked ? "on" : "off"), "ok"); } catch (e) { toast(e.message, "err"); }
+      } }, "Apply"),
+      el("p", { class: "muted small" }, "Applies to objects written after this — existing objects are untouched. 2–5× smaller for logs/JSON/text."));
+  }
+
   // versioning
   let vstat = "";
   try { vstat = t(parseXml(await (await api("GET", "/" + b, { query: { versioning: "" } })).text()), "Status"); } catch {}
@@ -1427,6 +1441,7 @@ const putUrl = await getSignedUrl(s3, new PutObjectCommand({ Bucket: "b", Key: "
       ["Get/Put/DeleteBucketReplication", "native JSON shape (not the AWS XML)"],
       ["Get/PutBucketNotificationConfiguration", "webhook targets, native JSON"],
       ["Get/Put/DeleteBucketWebsite", "static-site hosting: <code>?website</code> with IndexDocument/ErrorDocument; a query-less GET of <code>/</code> or <code>dir/</code> then serves the index, a miss the error doc. Pairs with a public-read policy + <code>GOSTORE_TLS_DOMAIN</code> for HTTPS — no reverse proxy."],
+      ["Get/PutBucketCompression", "gostore extra: <code>?compression</code> <code>{enabled:bool}</code> — transparent zstd compression at rest for new objects (erasure, non-SSE, single-part; already-compressed content-types skipped). Stored bytes shrink 2–5× for logs/JSON/text; the S3 ETag stays the plaintext md5."],
     ]));
     c.append(el("h3", {}, "Object"));
     c.append(TBL(["Operation", "Notes"], [

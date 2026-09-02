@@ -434,6 +434,16 @@ func (p *Pool) getPlain(ctx context.Context, set *Set, bucket, dir string) (io.R
 		}
 		return readCloser2{dr, pr}, logical, m, nil
 	}
+	if m.Compressed != "" {
+		pr, pw := io.Pipe()
+		go func() { _ = pw.CloseWithError(set.getObject(ctx, bucket, dir, 0, m.Size, pw)) }()
+		dr, derr := zstdDecompressRange(pr, 0, m.PlainSize)
+		if derr != nil {
+			_ = pr.CloseWithError(derr)
+			return nil, 0, nil, derr
+		}
+		return dr, m.PlainSize, m, nil
+	}
 	pr, pw := io.Pipe()
 	go func() { _ = pw.CloseWithError(set.getObject(ctx, bucket, dir, 0, m.Size, pw)) }()
 	return pr, m.Size, m, nil
@@ -452,6 +462,7 @@ func userMetaFromMeta(m *XLMeta) userMeta {
 		contentEnc:  m.ContentEnc,
 		user:        m.UserMeta,
 		tags:        m.UserTags,
+		compress:    m.Compressed != "", // keep it compressed after the move
 	}
 }
 

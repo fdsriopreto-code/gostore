@@ -99,6 +99,11 @@ type ObjectOptions struct {
 	UserDefined map[string]string // metadata to persist (PUT/COPY)
 	UserTags    string
 
+	// Compress asks the backend to store the object zstd-compressed at rest
+	// (set from the bucket's compression config; backend may still skip it
+	// for already-compressed content-types / tiny objects).
+	Compress bool
+
 	// Conditional request predicates (M3).
 	CheckPrecondFn func(ObjectInfo) bool
 

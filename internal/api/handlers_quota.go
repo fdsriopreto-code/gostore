@@ -72,3 +72,26 @@ func (s *Server) handleDeleteBucketQuota(w http.ResponseWriter, r *http.Request,
 	}
 	writeSuccessNoContent(w)
 }
+
+// --- ?compression (gostore-native bucket toggle) ----------------------
+
+// GET /{bucket}?compression
+func (s *Server) handleGetBucketCompression(w http.ResponseWriter, r *http.Request, bucket string) {
+	writeJSON(w, http.StatusOK, map[string]bool{"enabled": s.bcfg.Get(bucket).Compress})
+}
+
+// PUT /{bucket}?compression  body: {"enabled":true}
+func (s *Server) handlePutBucketCompression(w http.ResponseWriter, r *http.Request, bucket string) {
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
+		writeErrorResponse(w, r, ErrMalformedXML, "/"+bucket)
+		return
+	}
+	if err := s.bcfg.Update(bucket, func(c *bucketcfg.Config) { c.Compress = body.Enabled }); err != nil {
+		writeErrorResponse(w, r, ErrInternalError, "/"+bucket)
+		return
+	}
+	writeSuccessOK(w)
+}

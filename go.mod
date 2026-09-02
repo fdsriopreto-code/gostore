@@ -3,6 +3,7 @@ module github.com/lojadopocket/gostore
 go 1.27
 
 require (
+	github.com/klauspost/compress v1.20.0
 	github.com/klauspost/reedsolomon v1.14.2
 	github.com/minio/highwayhash v1.0.4
 	golang.org/x/crypto v0.55.0

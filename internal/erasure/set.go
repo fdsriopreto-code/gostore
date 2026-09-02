@@ -210,8 +210,14 @@ func (s *Set) putObjectSSE(ctx context.Context, bucket, key string, parts []part
 	staging := path.Join(tmpPrefix, storage.NewID())
 	defer s.cleanupStaging(ctx, staging)
 
-	dedup = dedup && dedupEnabled && sp == nil
+	// Transparent compression: single-part, non-SSE objects only, and it wins
+	// over dedup when a bucket enables both.
+	compress := len(parts) == 1 && sp == nil &&
+		shouldCompress(um.compress, false, um.contentType, parts[0].Size)
+	dedup = dedup && dedupEnabled && sp == nil && !compress
 	var objSHA = sha256.New()
+	var plainMD5c hash.Hash
+	var plainCount *countReader
 
 	// A deduped blob is shared by many keys, so it can't use a key-derived
 	// shard distribution — every referrer must agree on it. Use identity.
@@ -252,6 +258,12 @@ func (s *Set) putObjectSSE(ctx context.Context, bucket, key string, parts []part
 		if dedup {
 			reader = io.TeeReader(reader, objSHA) // hash the plaintext for the CAS key
 		}
+		if compress {
+			// md5 + count the plaintext, then feed compressed bytes to encode.
+			plainMD5c = md5.New()
+			plainCount = &countReader{r: io.TeeReader(reader, plainMD5c)}
+			reader = zstdCompressStream(plainCount)
+		}
 		if sp != nil {
 			reader = sp.wrapForEncrypt(reader)
 		}
@@ -283,6 +295,16 @@ func (s *Set) putObjectSSE(ctx context.Context, bucket, key string, parts []part
 	} else {
 		sum := md5.Sum(partMD5Raw)
 		meta.ETag = hex.EncodeToString(sum[:]) + "-" + fmt.Sprint(len(parts))
+	}
+	if compress && plainCount != nil {
+		// The shard files hold compressed bytes (meta.Size); record the
+		// plaintext size + md5 so reads know the logical shape and the S3
+		// ETag stays the md5 of what the client uploaded.
+		etag := hex.EncodeToString(plainMD5c.Sum(nil))
+		meta.Compressed = compressAlgo
+		meta.PlainSize = plainCount.n
+		meta.ETag = etag
+		meta.Parts[0].ETag = etag
 	}
 	if sp != nil {
 		meta.SSE = sse.Algorithm
@@ -611,7 +633,7 @@ func (s *Set) getObjectMeta(ctx context.Context, bucket, key string, meta *XLMet
 			return nil
 		}
 		body := meta.Inline[off:end]
-		if off == 0 && int64(len(body)) == meta.Size && verifiableETag(meta.SSE, meta.ETag) {
+		if off == 0 && int64(len(body)) == meta.Size && verifiableETag(meta, meta.ETag) {
 			if got := fmt.Sprintf("%x", md5.Sum(body)); got != meta.ETag {
 				integrityFailed(bucket, key, 0, meta.ETag, got)
 				return ErrObjectMismatch
@@ -682,7 +704,7 @@ func (s *Set) readPart(ctx context.Context, bucket, key string, meta *XLMeta, pm
 	// per-block bitrot hashes cannot — every data block can be individually
 	// intact yet reassembled wrong.
 	var vh hash.Hash
-	if *skip == 0 && *remaining >= pm.Size && verifiableETag(meta.SSE, pm.ETag) {
+	if *skip == 0 && *remaining >= pm.Size && verifiableETag(meta, pm.ETag) {
 		vh = md5.New()
 	}
 
@@ -819,11 +841,11 @@ func (s *Set) readPart(ctx context.Context, bucket, key string, meta *XLMeta, pm
 }
 
 // verifiableETag reports whether etag is a plain md5 hex string we can check
-// the assembled plaintext against. SSE objects store ciphertext on disk and
-// multipart composite ETags ("<md5>-<n>") are not a single md5, so both are
-// skipped.
-func verifiableETag(sseAlgo, etag string) bool {
-	if sseAlgo != "" || len(etag) != 32 {
+// the *assembled shard bytes* against. Skipped when the stored bytes are not
+// the plaintext (SSE ciphertext, zstd-compressed) or the etag is a multipart
+// composite ("<md5>-<n>").
+func verifiableETag(m *XLMeta, etag string) bool {
+	if m.SSE != "" || m.Compressed != "" || len(etag) != 32 {
 		return false
 	}
 	for i := 0; i < len(etag); i++ {
@@ -890,6 +912,7 @@ type userMeta struct {
 	contentEnc  string
 	user        map[string]string
 	tags        string
+	compress    bool // bucket wants transparent compression at rest
 }
 
 func (s *Set) forEachDisk(fn func(Disk) error) []error {

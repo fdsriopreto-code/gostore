@@ -56,6 +56,12 @@ type XLMeta struct {
 	// (ETag/PlainSize semantics unchanged).
 	Inline []byte `json:"inline,omitempty"`
 
+	// Compressed, when set ("zstd"), means the shard files hold the
+	// zstd-compressed plaintext: Size/part sizes are the compressed length,
+	// PlainSize is the logical object size, ETag the plaintext md5. Mutually
+	// exclusive with SSE and with DataRef.
+	Compressed string `json:"compressed,omitempty"`
+
 	// SSE-S3 at rest. When SSE == "AES256": Size/part sizes are ciphertext,
 	// PlainSize is the logical object size, ETag the plaintext md5.
 	SSE         string `json:"sse,omitempty"`

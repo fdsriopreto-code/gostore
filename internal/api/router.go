@@ -257,6 +257,8 @@ func (s *Server) dispatchBucket(w http.ResponseWriter, r *http.Request, bucket s
 			s.handleGetBucketNotification(w, r, bucket)
 		case has("website"):
 			s.handleGetBucketWebsite(w, r, bucket)
+		case has("compression"):
+			s.handleGetBucketCompression(w, r, bucket)
 		case has("quota"):
 			s.handleGetBucketQuota(w, r, bucket)
 		case q["list-type"] != nil && q["list-type"][0] == "2":
@@ -284,6 +286,8 @@ func (s *Server) dispatchBucket(w http.ResponseWriter, r *http.Request, bucket s
 			s.handlePutBucketLifecycle(w, r, bucket)
 		case has("website"):
 			s.handlePutBucketWebsite(w, r, bucket)
+		case has("compression"):
+			s.handlePutBucketCompression(w, r, bucket)
 		case has("quota"):
 			s.handlePutBucketQuota(w, r, bucket)
 		case has("acl"):

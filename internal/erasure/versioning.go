@@ -236,7 +236,7 @@ func (p *Pool) getVersionedOn(ctx context.Context, set *Set, bucket, key string,
 	}
 
 	logical := m.Size
-	if m.SSE != "" {
+	if m.SSE != "" || m.Compressed != "" {
 		logical = m.PlainSize
 	}
 	var off, length int64 = 0, logical
@@ -247,6 +247,17 @@ func (p *Pool) getVersionedOn(ctx context.Context, set *Set, bucket, key string,
 		}
 		off, length = o, l
 		oi.Size = length
+	}
+
+	if m.Compressed != "" {
+		pr, pw := io.Pipe()
+		go func() { _ = pw.CloseWithError(set.getObjectMeta(ctx, bucket, dir, m, 0, m.Size, pw)) }()
+		dr, derr := zstdDecompressRange(pr, off, length)
+		if derr != nil {
+			_ = pr.CloseWithError(derr)
+			return nil, derr
+		}
+		return &object.GetObjectReader{ObjInfo: oi, ReadCloser: dr}, nil
 	}
 
 	if m.SSE != "" {

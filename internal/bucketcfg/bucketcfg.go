@@ -43,6 +43,10 @@ type Config struct {
 	// Website, when set, turns the bucket into a static site: a GET for "/"
 	// or a "dir/" path serves IndexDocument, and a miss serves ErrorDocument.
 	Website *WebsiteConfig `json:"website,omitempty"`
+
+	// Compress stores new objects zstd-compressed at rest (erasure backend,
+	// non-SSE, single-part; already-compressed content-types are skipped).
+	Compress bool `json:"compress,omitempty"`
 }
 
 // WebsiteConfig is the static-website-hosting configuration for a bucket.

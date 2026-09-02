@@ -374,6 +374,7 @@ func (s *Server) vopts(bucket string, r *http.Request) object.ObjectOptions {
 	var lockCfg *bucketcfgObjectLock
 	if s.bcfg != nil {
 		c := s.bcfg.Get(bucket)
+		o.Compress = c.Compress
 		switch c.Versioning {
 		case "Enabled":
 			o.Versioned = true

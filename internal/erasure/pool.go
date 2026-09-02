@@ -291,9 +291,10 @@ func (p *Pool) GetObjectNInfo(ctx context.Context, bucket, key string, rs *objec
 		return nil, object.ErrPreconditionFailed
 	}
 
-	// logical (plaintext) size — differs from stored size when encrypted
+	// logical (plaintext) size — differs from stored size when encrypted or
+	// compressed at rest
 	logical := m.Size
-	if m.SSE != "" {
+	if m.SSE != "" || m.Compressed != "" {
 		logical = m.PlainSize
 	}
 	var off, length int64 = 0, logical
@@ -304,6 +305,22 @@ func (p *Pool) GetObjectNInfo(ctx context.Context, bucket, key string, rs *objec
 		}
 		off, length = o, l
 		oi.Size = length
+	}
+
+	if m.Compressed != "" {
+		// zstd isn't range-seekable: read the whole compressed stream, then
+		// decode and slice to the requested plaintext range.
+		pr, pw := io.Pipe()
+		go func() {
+			err := set.getObjectMeta(ctx, bucket, key, m, 0, m.Size, pw)
+			_ = pw.CloseWithError(err)
+		}()
+		dr, derr := zstdDecompressRange(pr, off, length)
+		if derr != nil {
+			_ = pr.CloseWithError(derr)
+			return nil, derr
+		}
+		return &object.GetObjectReader{ObjInfo: oi, ReadCloser: dr}, nil
 	}
 
 	if m.SSE != "" {
@@ -428,7 +445,7 @@ func (p *Pool) ensureBucket(ctx context.Context, bucket string) error {
 }
 
 func toUserMeta(opts object.ObjectOptions) userMeta {
-	um := userMeta{tags: opts.UserTags, user: map[string]string{}}
+	um := userMeta{tags: opts.UserTags, user: map[string]string{}, compress: opts.Compress}
 	for k, v := range opts.UserDefined {
 		switch k {
 		case "content-type":
@@ -448,7 +465,7 @@ func toUserMeta(opts object.ObjectOptions) userMeta {
 
 func metaToInfo(bucket, key string, m *XLMeta) object.ObjectInfo {
 	size := m.Size
-	if m.SSE != "" {
+	if m.SSE != "" || m.Compressed != "" {
 		size = m.PlainSize
 	}
 	oi := object.ObjectInfo{
