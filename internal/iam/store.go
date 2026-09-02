@@ -1,15 +1,19 @@
 package iam
 
 import (
+	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
+	"errors"
 	"time"
+
+	"github.com/lojadopocket/gostore/internal/configstore"
 )
 
-// persisted is the on-disk shape of the IAM database. A byte-identical copy
-// is written to <vol>/.gostore.sys/iam/store.json on every volume, and read
-// back from the first one available — no external database.
+// persisted is the serialised shape of the IAM database. It is stored as a
+// single blob ("iam/store.json") through configstore.Backend — i.e. as an
+// object replicated across every disk of every erasure set, so it is
+// cluster-wide with no external database. On a single disk the blob lands at
+// the same <root>/.gostore.sys/iam/store.json path older builds used.
 type persisted struct {
 	Users     map[string]userRec    `json:"users"`
 	Policies  map[string]string     `json:"policies"` // name -> JSON document
@@ -30,78 +34,53 @@ type svcAcctRec struct {
 	Status       string `json:"status"`
 }
 
+const storeKey = "iam/store.json"
+
 type store struct {
-	dirs []string
+	be configstore.Backend
 }
 
-func newStore(dirs []string) *store {
-	// De-dup and keep only the top-level volume roots.
-	seen := map[string]bool{}
-	var out []string
-	for _, d := range dirs {
-		abs, err := filepath.Abs(d)
-		if err != nil || seen[abs] {
-			continue
-		}
-		seen[abs] = true
-		out = append(out, abs)
+func newStore(be configstore.Backend) *store { return &store{be: be} }
+
+func emptyPersisted() persisted {
+	return persisted{
+		Users:    map[string]userRec{},
+		Policies: map[string]string{},
+		SvcAccts: map[string]svcAcctRec{},
 	}
-	return &store{dirs: out}
-}
-
-func (s *store) path(dir string) string {
-	return filepath.Join(dir, ".gostore.sys", "iam", "store.json")
 }
 
 func (s *store) load() (persisted, error) {
-	var p persisted
-	for _, d := range s.dirs {
-		b, err := os.ReadFile(s.path(d))
-		if err != nil {
-			continue
-		}
-		if err := json.Unmarshal(b, &p); err == nil {
-			return p, nil
-		}
+	b, err := s.be.ReadConfig(context.Background(), storeKey)
+	if errors.Is(err, configstore.ErrNotFound) {
+		return emptyPersisted(), nil
 	}
-	return persisted{
-		Users: map[string]userRec{}, Policies: map[string]string{}, SvcAccts: map[string]svcAcctRec{},
-	}, nil
+	if err != nil {
+		return persisted{}, err
+	}
+	var p persisted
+	if err := json.Unmarshal(b, &p); err != nil {
+		return emptyPersisted(), nil
+	}
+	if p.Users == nil {
+		p.Users = map[string]userRec{}
+	}
+	if p.Policies == nil {
+		p.Policies = map[string]string{}
+	}
+	if p.SvcAccts == nil {
+		p.SvcAccts = map[string]svcAcctRec{}
+	}
+	return p, nil
 }
 
 func (s *store) save(p persisted) error {
-	p.UpdatedAt = time.Now().UTC()
+	if p.UpdatedAt.IsZero() {
+		p.UpdatedAt = time.Now().UTC()
+	}
 	b, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
 		return err
 	}
-	var firstErr error
-	wrote := 0
-	for _, d := range s.dirs {
-		fp := s.path(d)
-		if err := os.MkdirAll(filepath.Dir(fp), 0o755); err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-		tmp := fp + ".tmp"
-		if err := os.WriteFile(tmp, b, 0o600); err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-		if err := os.Rename(tmp, fp); err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-		wrote++
-	}
-	if wrote == 0 {
-		return firstErr
-	}
-	return nil
+	return s.be.WriteConfig(context.Background(), storeKey, b)
 }

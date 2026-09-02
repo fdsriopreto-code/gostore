@@ -1,14 +1,17 @@
 package iam
 
 import (
+	"context"
 	"testing"
+	"time"
 
+	"github.com/lojadopocket/gostore/internal/configstore"
 	"github.com/lojadopocket/gostore/internal/iam/policy"
 )
 
 func newMgr(t *testing.T) *Manager {
 	t.Helper()
-	m, err := New("rootadmin", "rootsecret123", []string{t.TempDir()})
+	m, err := New("rootadmin", "rootsecret123", configstore.NewDir(t.TempDir()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,14 +50,14 @@ func TestUserPolicyEnforced(t *testing.T) {
 
 func TestPersistenceRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	m1, _ := New("rootadmin", "rootsecret123", []string{dir})
+	m1, _ := New("rootadmin", "rootsecret123", configstore.NewDir(dir))
 	_ = m1.SetPolicy("teamrw", []byte(`{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:*"],"Resource":["arn:aws:s3:::team-*/*","arn:aws:s3:::team-*"]}]}`))
 	if err := m1.AddUser("bob", "bobsecret1", []string{"teamrw"}); err != nil {
 		t.Fatal(err)
 	}
 	_ = m1.AddServiceAccount("bob", "bobsvc0000000000", "bobsvcsecret1", "")
 
-	m2, err := New("rootadmin", "rootsecret123", []string{dir})
+	m2, err := New("rootadmin", "rootsecret123", configstore.NewDir(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,4 +89,30 @@ func TestServiceAccountInheritsAndRestricts(t *testing.T) {
 	if m.IsAllowed("carolsvc00000000", policy.Args{Action: "s3:PutObject", BucketName: "b", ObjectName: "k"}) {
 		t.Fatal("svc must not PUT (inline restricts)")
 	}
+}
+
+func TestClusterRefreshPropagates(t *testing.T) {
+	be := configstore.NewDir(t.TempDir())
+	nodeA, _ := New("rootadmin", "rootsecret123", be)
+	nodeB, _ := New("rootadmin", "rootsecret123", be)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	nodeB.StartRefresh(ctx, 50*time.Millisecond)
+
+	if err := nodeA.AddUser("dave", "davesecret1", []string{"readonly"}); err != nil {
+		t.Fatal(err)
+	}
+	// nodeB has not seen it yet.
+	if _, ok := nodeB.LookupSecret("dave"); ok {
+		t.Fatal("nodeB saw dave before a refresh tick")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := nodeB.LookupSecret("dave"); ok {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("nodeB never picked up dave from the shared store")
 }

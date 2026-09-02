@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/lojadopocket/gostore/internal/bucketcfg"
+	"github.com/lojadopocket/gostore/internal/configstore"
 	"github.com/lojadopocket/gostore/internal/object"
 	fsb "github.com/lojadopocket/gostore/internal/object/fs"
 )
@@ -35,7 +36,7 @@ func TestLifecycleExpiration(t *testing.T) {
 	put(t, f, "lcbucket", "logs/fresh.txt", "fresh", 1*time.Hour, object.ObjectOptions{})
 	put(t, f, "lcbucket", "keep/x.txt", "keep", 30*24*time.Hour, object.ObjectOptions{})
 
-	store, _ := bucketcfg.Open([]string{t.TempDir()})
+	store, _ := bucketcfg.Open(configstore.NewDir(t.TempDir()))
 	_ = store.Update("lcbucket", func(c *bucketcfg.Config) {
 		c.Lifecycle = []bucketcfg.LifecycleRule{{
 			ID: "expire-logs", Prefix: "logs/", Status: "Enabled", ExpirationDays: 7,
@@ -65,7 +66,7 @@ func TestLifecycleNoncurrentVersionExpiration(t *testing.T) {
 	put(t, f, "lcbucket", "d/k", "v2", 35*24*time.Hour, object.ObjectOptions{Versioned: true})
 	put(t, f, "lcbucket", "d/k", "v3-current", 1*time.Hour, object.ObjectOptions{Versioned: true})
 
-	store, _ := bucketcfg.Open([]string{t.TempDir()})
+	store, _ := bucketcfg.Open(configstore.NewDir(t.TempDir()))
 	_ = store.Update("lcbucket", func(c *bucketcfg.Config) {
 		c.Lifecycle = []bucketcfg.LifecycleRule{{
 			ID: "purge-old-versions", Prefix: "", Status: "Enabled", NoncurrentVersionExpirationDays: 30,
@@ -86,7 +87,7 @@ func TestLifecycleDisabledRuleNoop(t *testing.T) {
 	f, _ := fsb.New(t.TempDir())
 	_ = f.MakeBucket(ctx(), "lcbucket", object.MakeBucketOptions{})
 	put(t, f, "lcbucket", "a.txt", "x", 100*24*time.Hour, object.ObjectOptions{})
-	store, _ := bucketcfg.Open([]string{t.TempDir()})
+	store, _ := bucketcfg.Open(configstore.NewDir(t.TempDir()))
 	_ = store.Update("lcbucket", func(c *bucketcfg.Config) {
 		c.Lifecycle = []bucketcfg.LifecycleRule{{ID: "r", Status: "Disabled", ExpirationDays: 1}}
 	})

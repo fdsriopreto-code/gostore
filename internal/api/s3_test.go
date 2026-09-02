@@ -20,6 +20,7 @@ import (
 	"github.com/lojadopocket/gostore/internal/auth"
 	"github.com/lojadopocket/gostore/internal/bucketcfg"
 	"github.com/lojadopocket/gostore/internal/config"
+	"github.com/lojadopocket/gostore/internal/configstore"
 	"github.com/lojadopocket/gostore/internal/event"
 	"github.com/lojadopocket/gostore/internal/iam"
 	"github.com/lojadopocket/gostore/internal/kms"
@@ -44,11 +45,11 @@ func newTestServer(t *testing.T) *httptest.Server {
 	if km, kerr := kms.New([]string{dir}); kerr == nil {
 		backend.SetKMS(km)
 	}
-	im, err := iam.New(testAK, testSK, []string{dir})
+	im, err := iam.New(testAK, testSK, configstore.NewDir(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
-	bc, err := bucketcfg.Open([]string{dir})
+	bc, err := bucketcfg.Open(configstore.NewDir(dir))
 	if err != nil {
 		t.Fatal(err)
 	}

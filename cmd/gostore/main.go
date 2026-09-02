@@ -28,6 +28,7 @@ import (
 	"github.com/lojadopocket/gostore/internal/bucketcfg"
 	"github.com/lojadopocket/gostore/internal/cluster"
 	"github.com/lojadopocket/gostore/internal/config"
+	"github.com/lojadopocket/gostore/internal/configstore"
 	"github.com/lojadopocket/gostore/internal/erasure"
 	"github.com/lojadopocket/gostore/internal/event"
 	"github.com/lojadopocket/gostore/internal/iam"
@@ -229,19 +230,29 @@ func runServer(args []string) error {
 // serve wires IAM, bucket config, the scanner and the HTTP servers around an
 // already-built object backend, and blocks until shutdown.
 func serve(cfg config.Config, obj object.Layer, clusterRPC http.Handler) error {
-	iamMgr, err := iam.New(cfg.RootUser, cfg.RootPassword, cfg.Volumes)
+	cb, ok := obj.(configstore.Backend)
+	if !ok {
+		return fmt.Errorf("object backend %T does not provide a config store", obj)
+	}
+
+	refreshCtx, stopRefresh := context.WithCancel(context.Background())
+	defer stopRefresh()
+
+	iamMgr, err := iam.New(cfg.RootUser, cfg.RootPassword, cb)
 	if err != nil {
 		return fmt.Errorf("init IAM: %w", err)
 	}
+	iamMgr.StartRefresh(refreshCtx, 30*time.Second)
 	logger.Info("IAM ready", "rootAccessKey", cfg.RootUser, "users", len(iamMgr.ListUsers()))
 	if os.Getenv("GOSTORE_ALLOW_ANONYMOUS") == "1" {
 		logger.Warn("GOSTORE_ALLOW_ANONYMOUS=1: unsigned requests are accepted and skip authorization")
 	}
 
-	bcfg, err := bucketcfg.Open(cfg.Volumes)
+	bcfg, err := bucketcfg.Open(cb)
 	if err != nil {
 		return fmt.Errorf("init bucket config: %w", err)
 	}
+	bcfg.StartRefresh(refreshCtx, 30*time.Second)
 	bus := event.New(bcfg)
 
 	scanInterval := time.Hour

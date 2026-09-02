@@ -1,14 +1,21 @@
 // Package bucketcfg stores the per-bucket configuration the S3 API layer
-// owns (policy, CORS, tag set, event notifications) as JSON replicated
-// across the volume roots — no external database. It is intentionally
-// separate from the object backend's own bucket bookkeeping.
+// owns (policy, CORS, tag set, event notifications, versioning, object lock,
+// replication, lifecycle) as a single JSON blob persisted through
+// configstore.Backend — i.e. as an object replicated across every disk of
+// every erasure set, so the config is cluster-wide with no external
+// database. It is intentionally separate from the object backend's own
+// bucket bookkeeping.
 package bucketcfg
 
 import (
+	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
+	"errors"
 	"sync"
+	"time"
+
+	"github.com/lojadopocket/gostore/internal/configstore"
+	"github.com/lojadopocket/gostore/internal/logger"
 )
 
 // Config is one bucket's API-level configuration.
@@ -86,45 +93,83 @@ type WebhookTarget struct {
 	Suffix string   `json:"suffix,omitempty"`
 }
 
-// Store is the replicated JSON config store.
-type Store struct {
-	mu   sync.RWMutex
-	dirs []string
-	all  map[string]*Config
+const storeKey = "bucketcfg/config.json"
+
+// envelope is the on-wire shape: the bucket map plus a version stamp the
+// cluster refresher compares.
+type envelope struct {
+	Buckets   map[string]*Config `json:"buckets"`
+	UpdatedAt time.Time          `json:"updatedAt"`
 }
 
-// Open loads (or initialises) the store from the given volume roots.
-func Open(volumeDirs []string) (*Store, error) {
-	seen := map[string]bool{}
-	var dirs []string
-	for _, d := range volumeDirs {
-		abs, err := filepath.Abs(d)
-		if err != nil || seen[abs] {
-			continue
-		}
-		seen[abs] = true
-		dirs = append(dirs, abs)
+// Store is the config store, backed by configstore.Backend.
+type Store struct {
+	mu       sync.RWMutex
+	be       configstore.Backend
+	all      map[string]*Config
+	lastSync time.Time
+}
+
+// Open loads (or initialises) the store from the object backend.
+func Open(be configstore.Backend) (*Store, error) {
+	s := &Store{be: be, all: map[string]*Config{}}
+	b, err := be.ReadConfig(context.Background(), storeKey)
+	if err != nil && !errors.Is(err, configstore.ErrNotFound) {
+		return nil, err
 	}
-	s := &Store{dirs: dirs, all: map[string]*Config{}}
-	for _, d := range dirs {
-		b, err := os.ReadFile(s.path(d))
-		if err != nil {
-			continue
-		}
-		var m map[string]*Config
-		if json.Unmarshal(b, &m) == nil {
-			s.all = m
-			break
-		}
-	}
-	if s.all == nil {
-		s.all = map[string]*Config{}
+	if err == nil {
+		s.loadBytes(b)
 	}
 	return s, nil
 }
 
-func (s *Store) path(dir string) string {
-	return filepath.Join(dir, ".gostore.sys", "bucketcfg", "config.json")
+// loadBytes accepts either the current envelope shape or the legacy bare
+// map[string]*Config, so an in-place upgrade keeps its data.
+func (s *Store) loadBytes(b []byte) {
+	var env envelope
+	if json.Unmarshal(b, &env) == nil && env.Buckets != nil {
+		s.all = env.Buckets
+		s.lastSync = env.UpdatedAt
+		return
+	}
+	var m map[string]*Config
+	if json.Unmarshal(b, &m) == nil && m != nil {
+		s.all = m
+	}
+}
+
+// StartRefresh polls the store and re-applies any version newer than the one
+// this node last wrote (cluster propagation of bucket policy/versioning/etc).
+func (s *Store) StartRefresh(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	t := time.NewTicker(interval)
+	go func() {
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				b, err := s.be.ReadConfig(ctx, storeKey)
+				if err != nil {
+					continue
+				}
+				var env envelope
+				if json.Unmarshal(b, &env) != nil || env.Buckets == nil {
+					continue
+				}
+				s.mu.Lock()
+				if env.UpdatedAt.After(s.lastSync) {
+					s.all = env.Buckets
+					s.lastSync = env.UpdatedAt
+					logger.Debug("bucketcfg: applied newer state from store", "updatedAt", env.UpdatedAt)
+				}
+				s.mu.Unlock()
+			}
+		}
+	}()
 }
 
 // Get returns a copy of the bucket config (never nil).
@@ -161,37 +206,15 @@ func (s *Store) Delete(bucket string) error {
 }
 
 func (s *Store) saveLocked() error {
-	b, err := json.MarshalIndent(s.all, "", "  ")
+	now := time.Now().UTC()
+	env := envelope{Buckets: s.all, UpdatedAt: now}
+	b, err := json.MarshalIndent(env, "", "  ")
 	if err != nil {
 		return err
 	}
-	var firstErr error
-	wrote := 0
-	for _, d := range s.dirs {
-		fp := s.path(d)
-		if err := os.MkdirAll(filepath.Dir(fp), 0o755); err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-		tmp := fp + ".tmp"
-		if err := os.WriteFile(tmp, b, 0o600); err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-		if err := os.Rename(tmp, fp); err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-		wrote++
+	if err := s.be.WriteConfig(context.Background(), storeKey, b); err != nil {
+		return err
 	}
-	if wrote == 0 {
-		return firstErr
-	}
+	s.lastSync = now
 	return nil
 }

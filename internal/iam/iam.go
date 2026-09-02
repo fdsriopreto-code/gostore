@@ -5,13 +5,16 @@
 package iam
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/lojadopocket/gostore/internal/configstore"
 	"github.com/lojadopocket/gostore/internal/iam/policy"
+	"github.com/lojadopocket/gostore/internal/logger"
 )
 
 var (
@@ -47,6 +50,10 @@ type Manager struct {
 
 	sts   map[string]stsRec // in-memory only (M9)
 	store *store
+
+	// lastSync is the UpdatedAt stamp of the persisted blob we last wrote or
+	// loaded; the background refresher only re-applies a newer one.
+	lastSync time.Time
 }
 
 type stsRec struct {
@@ -56,9 +63,9 @@ type stsRec struct {
 	expiry     time.Time
 }
 
-// New builds a Manager with the given root credential, persisting to the
-// given volume roots.
-func New(rootAccess, rootSecret string, volumeDirs []string) (*Manager, error) {
+// New builds a Manager with the given root credential, persisting through the
+// configstore backend (an object replicated across the cluster).
+func New(rootAccess, rootSecret string, be configstore.Backend) (*Manager, error) {
 	m := &Manager{
 		rootAccess: rootAccess,
 		rootSecret: rootSecret,
@@ -67,12 +74,22 @@ func New(rootAccess, rootSecret string, volumeDirs []string) (*Manager, error) {
 		custom:     map[string]*policy.Policy{},
 		builtin:    policy.Builtin(),
 		sts:        map[string]stsRec{},
-		store:      newStore(volumeDirs),
+		store:      newStore(be),
 	}
 	p, err := m.store.load()
 	if err != nil {
 		return nil, err
 	}
+	m.applyPersisted(p)
+	return m, nil
+}
+
+// applyPersisted replaces the in-memory user/svcacct/custom-policy state with
+// the contents of p. Caller must hold m.mu (or be in New before it's shared).
+func (m *Manager) applyPersisted(p persisted) {
+	m.users = map[string]userRec{}
+	m.svcAccts = map[string]svcAcctRec{}
+	m.custom = map[string]*policy.Policy{}
 	for k, v := range p.Users {
 		m.users[k] = v
 	}
@@ -86,7 +103,37 @@ func New(rootAccess, rootSecret string, volumeDirs []string) (*Manager, error) {
 		}
 		m.custom[name] = pol
 	}
-	return m, nil
+	m.lastSync = p.UpdatedAt
+}
+
+// StartRefresh polls the backing store on an interval and re-applies any
+// version newer than the one this node last wrote — this is how a user
+// created on one cluster node becomes visible on the others.
+func (m *Manager) StartRefresh(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	t := time.NewTicker(interval)
+	go func() {
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				p, err := m.store.load()
+				if err != nil {
+					continue
+				}
+				m.mu.Lock()
+				if p.UpdatedAt.After(m.lastSync) {
+					m.applyPersisted(p)
+					logger.Debug("iam: applied newer state from store", "updatedAt", p.UpdatedAt)
+				}
+				m.mu.Unlock()
+			}
+		}
+	}()
 }
 
 func (m *Manager) flush() error {
@@ -107,7 +154,12 @@ func (m *Manager) flush() error {
 			p.Policies[name] = string(b)
 		}
 	}
-	return m.store.save(p)
+	p.UpdatedAt = time.Now().UTC()
+	if err := m.store.save(p); err != nil {
+		return err
+	}
+	m.lastSync = p.UpdatedAt
+	return nil
 }
 
 // --- credential lookup (used by auth) --------------------------------
