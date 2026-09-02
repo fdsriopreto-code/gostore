@@ -151,8 +151,13 @@ diretório do host prevalece, então antes:
    GOSTORE_ROOT_PASSWORD=<senha forte, >=8>
    GOSTORE_REGION=us-east-1
    ```
-4. **Volume / Mount:** monta um volume persistente em `/data`. A imagem roda
-   como root, então mount root-owned do painel funciona sem chown.
+4. **Volume / Mount:** monta um volume **persistente** em `/data`. A imagem
+   roda como root, então mount root-owned do painel funciona sem chown.
+   ⚠️ **Sem esse volume persistente, TUDO some a cada redeploy** — buckets,
+   objetos e as access keys que você criar. Não existe banco externo: tudo
+   vive em `/data`. Se a cada restart o log mostrar
+   `data volume was EMPTY at startup` (e o Dashboard mostrar o aviso), o
+   mount não está persistindo — corrija no painel.
 5. Deploy. Domínio do painel -> serviço, porta `9000`.
 
 **Console web:** `https://SEU_DOMINIO/gostore/console/` — login com o

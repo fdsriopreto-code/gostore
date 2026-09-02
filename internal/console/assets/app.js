@@ -107,6 +107,7 @@ const ICON = {
   link: '<path d="M10 13a5 5 0 0 0 7 0l2-2a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-2 2a5 5 0 0 0 7 7l1-1"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>', refresh: '<path d="M21 12a9 9 0 1 1-3-6.7M21 4v5h-5"/>',
   chev: '<path d="M9 6l6 6-6 6"/>', ext: '<path d="M14 4h6v6M20 4l-9 9M18 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h6"/>',
+  arrowLeft: '<path d="M19 12H5M12 19l-7-7 7-7"/>', download: '<path d="M12 3v12M7 10l5 5 5-5M5 21h14"/>',
   layers: '<path d="M12 3 2 8l10 5 10-5z"/><path d="M2 13l10 5 10-5M2 18l10 5 10-5"/>',
   lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
   clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>', branch: '<circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="9" r="2.5"/><path d="M6 8.5v7M6 15.5A9 9 0 0 0 15 9"/>',
@@ -245,6 +246,8 @@ function renderNav() {
 
 const DOC_GROUPS = ["Get started", "Access control", "Data management", "Reference", "Operations"];
 
+let lastConsoleRoute = "dashboard";
+
 async function render() {
   renderNav();
   $("#sidenav").classList.remove("open");
@@ -252,6 +255,10 @@ async function render() {
   v.innerHTML = ""; v.className = "wrap";
   v.append(el("div", { class: "empty" }, el("span", { class: "spin" })));
   const r = route();
+  // Reading mode: a doc page hides the app sidebar and shows a back arrow.
+  const reading = r === "docs" || r.startsWith("docs/");
+  $("#app").classList.toggle("reading", reading);
+  if (!reading) lastConsoleRoute = r;
   try {
     if (r === "dashboard") await viewDashboard(v);
     else if (r === "buckets") await viewBuckets(v);
@@ -299,9 +306,20 @@ async function viewDashboard(v) {
   tile("Drives", (info.drives ?? "—") + "", ICON.gauge);
   tile("Total space", fmtSize(info.totalSpace) || "—", ICON.bucket);
   tile("Free space", fmtSize(info.freeSpace) || "—", ICON.bucket);
-  tile("Users", (info.users ?? "—") + "", ICON.key);
+  tile("Access keys", (info.users ?? "—") + (info.serviceAccounts ? " + " + info.serviceAccounts + " svc" : ""), ICON.key);
   tile("Policies", (info.policies ?? "—") + "", ICON.shield);
+  if (info.dataInitialized) tile("Storage initialized", relTime(info.dataInitialized), ICON.clock);
   v.append(tiles);
+
+  if (info.volumeWasEmptyAtBoot) {
+    v.append(el("div", { class: "callout warn", style: "margin-top:16px" },
+      el("b", {}, "This volume was empty when gostore started"),
+      el("span", { html:
+        "If this is your first run, ignore it. But if buckets or access keys keep disappearing after a restart/redeploy, "
+        + "the data directory <code>" + (info.dataDir || "/data") + "</code> is <b>not persistent</b> — "
+        + "mount a named volume / persistent disk to it and keep that mount across deploys. "
+        + "Everything (objects, metadata, IAM) lives there; there is no external database." })));
+  }
 
   v.append(el("h3", { style: "margin:26px 0 4px;font-size:15px" }, "Quick start"));
   v.append(el("p", { class: "muted small" }, "Point the AWS CLI at this endpoint and you're storing objects:"));
@@ -568,6 +586,43 @@ async function bucketSettings(v, b) {
     JSON.stringify({ webhooks: [{ id: "w1", url: "https://example.com/hook", events: ["s3:ObjectCreated:*"], prefix: "", suffix: "" }] }, null, 2));
 }
 
+function randHex(bytes) {
+  const b = new Uint8Array(bytes); crypto.getRandomValues(b);
+  return [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+}
+
+// credsModal shows a freshly-minted key ONCE, with copy + download.
+function credsModal(ak, sk, note) {
+  const d = $("#modal"); d.innerHTML = "";
+  d.append(el("h3", {}, "Access key created"));
+  d.append(el("div", { class: "callout warn" },
+    el("b", {}, "Copy the secret key now"),
+    "It is shown only once and cannot be retrieved later. Save it in a password manager or download the credentials file."));
+  if (note) d.append(el("p", { class: "hint" }, note));
+  const row = (label, val) => {
+    d.append(el("label", { class: "field-label" }, label));
+    const i = el("input", { value: val, readonly: "", spellcheck: "false" });
+    const r = el("div", { class: "creds-row" }, i,
+      el("button", { class: "ghost", onclick: () => copyText(val) }, ic(ICON.copy), "Copy"));
+    d.append(r);
+  };
+  row("Access key ID", ak);
+  row("Secret access key", sk);
+  const btns = el("div", { class: "btns" });
+  const dl = el("button", { class: "ghost" }, ic(ICON.download), "Download .json");
+  dl.onclick = () => {
+    const blob = new Blob([JSON.stringify({
+      accessKeyId: ak, secretAccessKey: sk,
+      endpoint: location.origin, region: SERVER.region || REGION,
+    }, null, 2)], { type: "application/json" });
+    const a = el("a", { href: URL.createObjectURL(blob), download: ak + ".credentials.json" });
+    document.body.append(a); a.click(); a.remove();
+  };
+  const done = el("button", { class: "primary" }, "Done");
+  done.onclick = () => { d.close(); render(); };
+  btns.append(dl, done); d.append(btns); d.showModal();
+}
+
 async function viewKeys(v) {
   const [ur, sr] = await Promise.all([api("GET", "/gostore/admin/v1/users"), api("GET", "/gostore/admin/v1/service-accounts")]);
   if (ur.status === 403) { pageHeader(v, "Access Keys"); v.append(emptyState(ICON.lock, "No admin permission", "Your key can't manage users. Sign in with an admin key.")); return; }
@@ -575,22 +630,21 @@ async function viewKeys(v) {
   const svcs = sr.ok ? (await sr.json()) || [] : [];
   pageHeader(v, "Access Keys", users.length + " users · " + svcs.length + " service accounts", [
     el("button", { class: "ghost", onclick: render }, ic(ICON.refresh), "Refresh"),
-    el("button", { onclick: async () => {
-      try {
-        const j = await (await must(await api("POST", "/gostore/admin/v1/service-accounts", { contentType: "application/json", body: "{}" }))).json();
-        modal("Service account created", "Copy the secret now — it is shown only once.", [
-          { name: "a", label: "Access key", value: j.accessKey, readonly: true },
-          { name: "s", label: "Secret key", value: j.secretKey, readonly: true }], async () => {}, "Done");
-        render();
-      } catch (e) { toast(e.message, "err"); }
-    } }, ic(ICON.plus), "Service account"),
-    el("button", { class: "primary", onclick: () => modal("Create user", "Access key ≥3 chars · secret ≥8 chars.", [
-      { name: "accessKey", label: "Access key" }, { name: "secretKey", label: "Secret key", type: "password" },
+    el("button", { class: "ghost", onclick: () => modal("Custom access key", "Choose your own access key ID (≥ 3 chars) and secret (≥ 8 chars).", [
+      { name: "accessKey", label: "Access key ID" }, { name: "secretKey", label: "Secret access key", type: "password" },
       { name: "policy", label: "Policy", type: "select", value: "readwrite", options: ["readwrite", "readonly", "writeonly", "consoleAdmin", "diagnostics"] },
     ], async (val) => {
       await must(await api("PUT", "/gostore/admin/v1/users", { contentType: "application/json", body: JSON.stringify({ accessKey: val.accessKey, secretKey: val.secretKey, policies: [val.policy] }) }));
-      toast("User created", "ok"); render();
-    }) }, ic(ICON.plus), "Create user"),
+      credsModal(val.accessKey, val.secretKey, "Policy: " + val.policy);
+    }) }, ic(ICON.plus), "Custom key"),
+    el("button", { class: "primary", onclick: () => modal("Generate access key",
+      "A random access key ID + secret are generated. The secret is shown once — copy or download it.", [
+      { name: "policy", label: "Policy", type: "select", value: "readwrite", options: ["readwrite", "readonly", "writeonly", "consoleAdmin", "diagnostics"] },
+    ], async (val) => {
+      const ak = "gk" + randHex(9), sk = randHex(24);
+      await must(await api("PUT", "/gostore/admin/v1/users", { contentType: "application/json", body: JSON.stringify({ accessKey: ak, secretKey: sk, policies: [val.policy] }) }));
+      credsModal(ak, sk, "Policy: " + val.policy + " · this key is persisted on the server.");
+    }, "Generate") }, ic(ICON.key), "Generate access key"),
   ]);
   const tb = el("tbody");
   for (const u of users) tb.append(el("tr", {},
@@ -643,6 +697,12 @@ async function viewMonitoring(v) {
 function viewDocs(v, id) {
   const d = DOCS.find((x) => x.id === id) || DOCS[0];
   v.innerHTML = ""; v.className = "wrap";
+
+  const back = el("div", { class: "docs-back" },
+    ic(ICON.arrowLeft), "Back to console");
+  back.onclick = () => go(lastConsoleRoute || "dashboard");
+  v.append(back);
+
   pageHeader(v, "Documentation", "Everything you need to connect to and operate gostore.");
 
   const shell = el("div", { class: "docs-shell" });
@@ -1081,6 +1141,10 @@ GOSTORE_CLUSTER_SELF=http://node2:9000 gostore server \\
 
   { id: "config", group: "Operations", icon: ICON.term, title: "Server configuration", body: (c) => {
     c.append(P("All configuration is environment variables passed to the <code>gostore server</code> process. No config file, no database."));
+    c.append(el("h3", {}, "Persistence — read this first"));
+    c.append(P("Everything gostore stores — object data, object metadata, buckets, <b>and every access key / user / policy you create</b> — lives on the volume directory (<code>/data</code> in the Docker image). There is no external database."));
+    c.append(callout("If keys or buckets vanish after a restart",
+      "Your volume is not persistent. On Docker / a PaaS you must mount a <b>named volume or a persistent disk</b> to <code>/data</code> and keep that same mount across redeploys — an anonymous volume or the container's writable layer is wiped when the container is replaced. gostore logs <code>data volume was EMPTY at startup</code> on every boot when this is the case, and the Dashboard shows a warning. Compose: <code>volumes: [gostore-data:/data]</code>. EasyPanel/Coolify: add a persistent volume mapped to <code>/data</code>.", "warn"));
     c.append(el("h3", {}, "Core"));
     c.append(TBL(["Variable", "Purpose"], [
       ["GOSTORE_ROOT_USER / GOSTORE_ROOT_PASSWORD", "root credential (password &ge; 8 chars)"],

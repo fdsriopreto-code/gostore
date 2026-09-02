@@ -45,9 +45,21 @@ type FS struct {
 	nsMu   sync.Mutex
 	nsLock map[string]*sync.RWMutex
 
-	format diskFormat
-	kms    kmsWrapper
+	format     diskFormat
+	justInited bool // true when this run created the format file (empty volume)
+	kms        kmsWrapper
 }
+
+// FreshlyFormatted reports whether the volume was empty when the process
+// started (no format.json). If this keeps returning true across restarts the
+// data directory is not persistent.
+func (f *FS) FreshlyFormatted() bool { return f.justInited }
+
+// DataDir returns the absolute volume root.
+func (f *FS) DataDir() string { return f.root }
+
+// FormatCreated returns when the volume was first initialised.
+func (f *FS) FormatCreated() string { return f.format.Created }
 
 // kmsWrapper is the subset of *kms.Manager the fs backend needs (kept as an
 // interface so tests don't need a real KMS).
@@ -111,6 +123,7 @@ func (f *FS) loadOrInitFormat() error {
 		return err
 	}
 	f.format = diskFormat{Version: formatVersion, ID: newID(), Created: time.Now().UTC().Format(time.RFC3339)}
+	f.justInited = true
 	nb, _ := json.MarshalIndent(f.format, "", "  ")
 	return writeFileAtomic(p, nb, 0o644)
 }

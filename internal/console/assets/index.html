@@ -181,6 +181,15 @@ td .nm span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .docs-shell{grid-template-columns:1fr;gap:12px}
   .docs-toc{position:static;max-height:none;border-bottom:1px solid var(--border);padding-bottom:10px}
 }
+/* reading mode: hide the app sidebar while a doc is open */
+#app.reading{grid-template-columns:1fr}
+#app.reading aside.nav{display:none}
+.docs-back{display:inline-flex;align-items:center;gap:7px;font-size:13px;font-weight:600;
+  color:var(--text-2);cursor:pointer;margin-bottom:14px;user-select:none}
+.docs-back:hover{color:var(--text)}
+.docs-back svg{width:16px;height:16px}
+.creds-row{display:flex;gap:8px;align-items:center;margin:2px 0 12px}
+.creds-row input{flex:1;font-family:var(--mono);font-size:12.5px}
 
 /* docs prose */
 .prose h2{font-size:24px;margin:0 0 6px}

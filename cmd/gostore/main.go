@@ -247,7 +247,23 @@ func serve(cfg config.Config, obj object.Layer, clusterRPC http.Handler) error {
 		return fmt.Errorf("init IAM: %w", err)
 	}
 	iamMgr.StartRefresh(refreshCtx, 30*time.Second)
-	logger.Info("IAM ready", "rootAccessKey", cfg.RootUser, "users", len(iamMgr.ListUsers()))
+	logger.Info("IAM ready",
+		"rootAccessKey", cfg.RootUser,
+		"users", len(iamMgr.ListUsers()),
+		"serviceAccounts", len(iamMgr.ListServiceAccounts("")))
+
+	// If the volume was empty at boot AND this keeps happening on every
+	// restart, the data directory is not persistent — buckets, objects and
+	// access keys will vanish on redeploy. Make that loud.
+	if fc, ok := obj.(interface {
+		FreshlyFormatted() bool
+		DataDir() string
+	}); ok && fc.FreshlyFormatted() {
+		logger.Warn("data volume was EMPTY at startup — first run, OR the volume is not persistent. "+
+			"If access keys / buckets disappear after a restart or redeploy, mount a persistent "+
+			"volume (named volume or persistent disk) to this path and keep it across deploys.",
+			"dataDir", fc.DataDir())
+	}
 	if os.Getenv("GOSTORE_ALLOW_ANONYMOUS") == "1" {
 		logger.Warn("GOSTORE_ALLOW_ANONYMOUS=1: unsigned requests are accepted and skip authorization")
 	}

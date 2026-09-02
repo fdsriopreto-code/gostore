@@ -113,17 +113,28 @@ func (s *Server) adminInfo(w http.ResponseWriter, r *http.Request) {
 		total += d.TotalSpace
 		free += d.FreeSpace
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"version":    "gostore",
-		"mode":       backendMode(si.Backend.Type),
-		"region":     s.cfg.Region,
-		"drives":     len(si.Disks),
-		"totalSpace": total,
-		"freeSpace":  free,
-		"parity":     si.Backend.StandardSCParity,
-		"users":      len(s.iam.ListUsers()),
-		"policies":   len(s.iam.ListPolicies()),
-	})
+	info := map[string]any{
+		"version":         "gostore",
+		"mode":            backendMode(si.Backend.Type),
+		"region":          s.cfg.Region,
+		"drives":          len(si.Disks),
+		"totalSpace":      total,
+		"freeSpace":       free,
+		"parity":          si.Backend.StandardSCParity,
+		"users":           len(s.iam.ListUsers()),
+		"serviceAccounts": len(s.iam.ListServiceAccounts("")),
+		"policies":        len(s.iam.ListPolicies()),
+	}
+	if d, ok := s.obj.(interface {
+		DataDir() string
+		FormatCreated() string
+		FreshlyFormatted() bool
+	}); ok {
+		info["dataDir"] = d.DataDir()
+		info["dataInitialized"] = d.FormatCreated()
+		info["volumeWasEmptyAtBoot"] = d.FreshlyFormatted()
+	}
+	writeJSON(w, http.StatusOK, info)
 }
 
 func (s *Server) adminHeal(w http.ResponseWriter, r *http.Request) {
