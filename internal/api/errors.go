@@ -3,6 +3,8 @@ package api
 import (
 	"encoding/xml"
 	"net/http"
+
+	"github.com/lojadopocket/gostore/internal/metrics"
 )
 
 // APIErrorCode enumerates the S3 error codes we can emit. The subset here
@@ -129,6 +131,7 @@ type errorResponse struct {
 // writeErrorResponse emits an S3-style XML error.
 func writeErrorResponse(w http.ResponseWriter, r *http.Request, code APIErrorCode, resource string) {
 	ae := GetAPIError(code)
+	metrics.APIError(ae.Code)
 	resp := errorResponse{
 		Code:      ae.Code,
 		Message:   ae.Description,

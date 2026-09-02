@@ -78,7 +78,42 @@ func (p *Pool) ReadConfig(ctx context.Context, key string) ([]byte, error) {
 			best, bestN = h, c
 		}
 	}
-	return sample[best], nil
+	winner := sample[best]
+
+	// Read-repair: if we have a solid quorum winner but some disk is missing
+	// or stale, write the winner back (once at a time per key) so a later
+	// quorum failure can't lose the config.
+	if bestN >= configQuorum(len(disks)) && bestN < len(disks) && repairGate(key) {
+		go func(w []byte) {
+			defer repairDone(key)
+			for i, d := range disks {
+				if len(blobs[i]) != len(w) || sha256.Sum256(blobs[i]) != best {
+					_ = d.WriteAll(context.Background(), configReservedBucket, obj, w)
+				}
+			}
+		}(append([]byte(nil), winner...))
+	}
+	return winner, nil
+}
+
+var (
+	repairMu sync.Mutex
+	repairIP = map[string]bool{}
+)
+
+func repairGate(key string) bool {
+	repairMu.Lock()
+	defer repairMu.Unlock()
+	if repairIP[key] {
+		return false
+	}
+	repairIP[key] = true
+	return true
+}
+func repairDone(key string) {
+	repairMu.Lock()
+	delete(repairIP, key)
+	repairMu.Unlock()
 }
 
 // WriteConfig replicates data to every disk; succeeds on a write quorum.

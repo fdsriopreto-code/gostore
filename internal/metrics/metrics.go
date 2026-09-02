@@ -20,6 +20,7 @@ var (
 
 	mu       sync.Mutex
 	reqTotal = map[reqKey]uint64{}
+	errTotal = map[string]uint64{}
 
 	bytesIn  atomic.Uint64
 	bytesOut atomic.Uint64
@@ -40,6 +41,13 @@ type reqKey struct {
 
 // SetVersion records the build version for gostore_build_info.
 func SetVersion(v string) { version = v }
+
+// APIError counts one S3 error response by its code (e.g. "NoSuchKey").
+func APIError(code string) {
+	mu.Lock()
+	errTotal[code]++
+	mu.Unlock()
+}
 
 // Record accounts one finished HTTP request.
 func Record(method string, status int, inBytes, outBytes int64, seconds float64) {
@@ -142,6 +150,20 @@ func WritePrometheus(w io.Writer, g Gauges) {
 	line(fmt.Sprintf("gostore_http_request_duration_seconds_bucket{le=\"+Inf\"} %d", cum))
 	line(fmt.Sprintf("gostore_http_request_duration_seconds_sum %s", strconv.FormatFloat(durSum, 'g', -1, 64)))
 	line(fmt.Sprintf("gostore_http_request_duration_seconds_count %d", durN))
+	mu.Unlock()
+
+	mu.Lock()
+	if len(errTotal) > 0 {
+		help("gostore_s3_errors_total", "counter", "S3 error responses by code.")
+		ecodes := make([]string, 0, len(errTotal))
+		for c := range errTotal {
+			ecodes = append(ecodes, c)
+		}
+		sort.Strings(ecodes)
+		for _, c := range ecodes {
+			line(fmt.Sprintf("gostore_s3_errors_total{code=%q} %d", c, errTotal[c]))
+		}
+	}
 	mu.Unlock()
 
 	help("gostore_disks", "gauge", "Disk counts by state.")

@@ -360,13 +360,22 @@ func (p *Pool) DeleteObjects(ctx context.Context, bucket string, objs []object.O
 	defer p.invalidateList(bucket)
 	deleted := make([]object.DeletedObject, len(objs))
 	errs := make([]error, len(objs))
+	sem := make(chan struct{}, 16)
+	var wg sync.WaitGroup
 	for i, o := range objs {
-		if _, err := p.DeleteObject(ctx, bucket, o.ObjectName, opts); err != nil {
-			errs[i] = err
-			continue
-		}
-		deleted[i] = object.DeletedObject{ObjectName: o.ObjectName}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, name string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if _, err := p.DeleteObject(ctx, bucket, name, opts); err != nil {
+				errs[i] = err
+				return
+			}
+			deleted[i] = object.DeletedObject{ObjectName: name}
+		}(i, o.ObjectName)
 	}
+	wg.Wait()
 	return deleted, errs
 }
 

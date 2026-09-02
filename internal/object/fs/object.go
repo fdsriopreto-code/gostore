@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/lojadopocket/gostore/internal/object"
@@ -350,14 +351,22 @@ func (f *FS) DeleteObject(ctx context.Context, bucket, obj string, opts object.O
 func (f *FS) DeleteObjects(ctx context.Context, bucket string, objs []object.ObjectToDelete, opts object.ObjectOptions) ([]object.DeletedObject, []error) {
 	deleted := make([]object.DeletedObject, len(objs))
 	errs := make([]error, len(objs))
+	sem := make(chan struct{}, 16)
+	var wg sync.WaitGroup
 	for i, o := range objs {
-		_, err := f.DeleteObject(ctx, bucket, o.ObjectName, opts)
-		if err != nil {
-			errs[i] = err
-			continue
-		}
-		deleted[i] = object.DeletedObject{ObjectName: o.ObjectName}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, name string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if _, err := f.DeleteObject(ctx, bucket, name, opts); err != nil {
+				errs[i] = err
+				return
+			}
+			deleted[i] = object.DeletedObject{ObjectName: name}
+		}(i, o.ObjectName)
 	}
+	wg.Wait()
 	return deleted, errs
 }
 
