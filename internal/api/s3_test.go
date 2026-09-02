@@ -771,3 +771,61 @@ func TestContentTypeSniffFromExtension(t *testing.T) {
 		}
 	}
 }
+
+func TestBucketQuota(t *testing.T) {
+	srv := newTestServer(t)
+	if r := do(t, srv, http.MethodPut, "/qbucket", []byte{}, nil); r.StatusCode != 200 {
+		t.Fatalf("mb: %d", r.StatusCode)
+	}
+	// set a tight quota: 10 bytes total
+	if r := do(t, srv, http.MethodPut, "/qbucket?quota", []byte(`{"bytes":10,"objects":0}`),
+		map[string]string{"Content-Type": "application/json"}); r.StatusCode != 200 {
+		t.Fatalf("put quota: %d %s", r.StatusCode, readBody(t, r))
+	}
+	// first small object fits
+	if r := do(t, srv, http.MethodPut, "/qbucket/a", []byte("12345"), nil); r.StatusCode != 200 {
+		t.Fatalf("first put: %d %s", r.StatusCode, readBody(t, r))
+	}
+	// run the scanner so usage is known
+	if r := doAs(t, srv, testAK, testSK, http.MethodPost, "/gostore/admin/v1/scanner/run", nil); r.StatusCode != 200 {
+		t.Fatalf("scan: %d", r.StatusCode)
+	}
+	// now a 6-byte object would push 5+6=11 > 10 → refused
+	r := do(t, srv, http.MethodPut, "/qbucket/b", []byte("123456"), nil)
+	if r.StatusCode != http.StatusForbidden {
+		t.Fatalf("over-quota put: got %d, want 403 (%s)", r.StatusCode, readBody(t, r))
+	}
+	if b := readBody(t, r); !strings.Contains(b, "QuotaExceeded") {
+		t.Fatalf("over-quota body: %s", b)
+	}
+	// removing the quota lets it through
+	if r := do(t, srv, http.MethodDelete, "/qbucket?quota", nil, nil); r.StatusCode != 204 {
+		t.Fatalf("delete quota: %d", r.StatusCode)
+	}
+	if r := do(t, srv, http.MethodPut, "/qbucket/b", []byte("123456"), nil); r.StatusCode != 200 {
+		t.Fatalf("put after quota removed: %d", r.StatusCode)
+	}
+}
+
+func TestPrometheusMetrics(t *testing.T) {
+	srv := newTestServer(t)
+	_ = do(t, srv, http.MethodPut, "/mbucket", []byte{}, nil)
+	_ = do(t, srv, http.MethodGet, "/", nil, nil)
+
+	resp, err := http.Get(srv.URL + "/gostore/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := readBody(t, resp)
+	if resp.StatusCode != 200 {
+		t.Fatalf("metrics: %d", resp.StatusCode)
+	}
+	for _, want := range []string{
+		"gostore_build_info{", "gostore_http_requests_total{method=\"PUT\"",
+		"gostore_up ", "gostore_capacity_bytes ", "gostore_uptime_seconds ",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics missing %q in:\n%s", want, body)
+		}
+	}
+}

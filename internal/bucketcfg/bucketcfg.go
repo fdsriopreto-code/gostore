@@ -33,6 +33,12 @@ type Config struct {
 	Replication []ReplicationRule `json:"replication,omitempty"`
 	// Lifecycle rules expire objects / noncurrent versions / stale uploads.
 	Lifecycle []LifecycleRule `json:"lifecycle,omitempty"`
+
+	// QuotaBytes / QuotaObjects cap a bucket's total size / object count.
+	// 0 = no limit. Enforced against the scanner's last usage snapshot, so
+	// it is a soft (eventually-consistent) quota.
+	QuotaBytes   int64 `json:"quotaBytes,omitempty"`
+	QuotaObjects int64 `json:"quotaObjects,omitempty"`
 }
 
 // LifecycleRule is a subset of an S3 lifecycle rule.

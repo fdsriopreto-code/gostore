@@ -38,6 +38,10 @@ func (s *Server) handlePutObjectPart(w http.ResponseWriter, r *http.Request, buc
 		writeErrorResponse(w, r, ErrMissingContentLength, "/"+bucket+"/"+key)
 		return
 	}
+	if s.quotaExceeded(bucket, size) {
+		writeErrorResponse(w, r, ErrQuotaExceeded, "/"+bucket+"/"+key)
+		return
+	}
 	pi, err := s.obj.PutObjectPart(r.Context(), bucket, key, uploadID, partNum,
 		object.NewPutObjReader(r.Body, size, size), object.ObjectOptions{})
 	if err != nil {

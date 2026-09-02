@@ -29,6 +29,10 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, bucket,
 		writeErrorResponse(w, r, ErrEntityTooLarge, "/"+bucket+"/"+key)
 		return
 	}
+	if s.quotaExceeded(bucket, size) {
+		writeErrorResponse(w, r, ErrQuotaExceeded, "/"+bucket+"/"+key)
+		return
+	}
 
 	opts := s.vopts(bucket, r)
 	opts.UserDefined = extractMetadata(r, key)

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/lojadopocket/gostore/internal/logger"
+	"github.com/lojadopocket/gostore/internal/metrics"
 )
 
 type ctxKey int
@@ -89,6 +90,11 @@ func withAccessLog(next http.Handler) http.Handler {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w}
 		next.ServeHTTP(rec, r)
+		inBytes := r.ContentLength
+		if inBytes < 0 {
+			inBytes = 0
+		}
+		metrics.Record(r.Method, rec.status, inBytes, int64(rec.bytes))
 		logger.Info("s3 request",
 			"method", r.Method,
 			"path", r.URL.Path,

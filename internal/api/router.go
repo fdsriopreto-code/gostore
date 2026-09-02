@@ -57,6 +57,7 @@ func NewServer(cfg config.Config, obj object.Layer, im *iam.Manager, bc *bucketc
 	mux.HandleFunc("GET /gostore/health/cluster", s.handleHealthReady)
 	mux.HandleFunc("GET /gostore/health/selftest", s.handleSelfTest)
 	mux.HandleFunc("GET /gostore/health/persistence", s.handlePersistence)
+	mux.HandleFunc("GET /gostore/metrics", s.handleMetrics)
 	mux.Handle("/gostore/admin/v1/", http.HandlerFunc(s.handleAdmin))
 	if clusterRPC != nil {
 		mux.Handle("/gostore/internal/", clusterRPC)
@@ -183,6 +184,8 @@ func (s *Server) dispatchBucket(w http.ResponseWriter, r *http.Request, bucket s
 			s.handleGetBucketLifecycle(w, r, bucket)
 		case has("notification"):
 			s.handleGetBucketNotification(w, r, bucket)
+		case has("quota"):
+			s.handleGetBucketQuota(w, r, bucket)
 		case q["list-type"] != nil && q["list-type"][0] == "2":
 			s.handleListObjectsV2(w, r, bucket)
 		default:
@@ -206,6 +209,8 @@ func (s *Server) dispatchBucket(w http.ResponseWriter, r *http.Request, bucket s
 			s.handlePutBucketReplication(w, r, bucket)
 		case has("lifecycle"):
 			s.handlePutBucketLifecycle(w, r, bucket)
+		case has("quota"):
+			s.handlePutBucketQuota(w, r, bucket)
 		case has("acl"):
 			writeSuccessOK(w) // accept-and-ignore
 		default:
@@ -223,6 +228,8 @@ func (s *Server) dispatchBucket(w http.ResponseWriter, r *http.Request, bucket s
 			s.handleDeleteBucketReplication(w, r, bucket)
 		case has("lifecycle"):
 			s.handleDeleteBucketLifecycle(w, r, bucket)
+		case has("quota"):
+			s.handleDeleteBucketQuota(w, r, bucket)
 		default:
 			s.handleDeleteBucket(w, r, bucket)
 		}

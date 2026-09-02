@@ -201,6 +201,15 @@ const fmtSize = (n) => {
   return (i ? n.toFixed(1) : n) + " " + u[i];
 };
 const fmtDate = (s) => (s ? new Date(s).toLocaleString() : "");
+// parseSize turns "2 GB" / "500mb" / "1073741824" into bytes (0 if blank/NaN).
+function parseSize(s) {
+  s = String(s || "").trim().toLowerCase();
+  if (!s) return 0;
+  const m = s.match(/^([\d.]+)\s*(b|kb|mb|gb|tb|kib|mib|gib|tib)?$/);
+  if (!m) return NaN;
+  const mul = { b: 1, kb: 1e3, mb: 1e6, gb: 1e9, tb: 1e12, kib: 1024, mib: 1048576, gib: 1073741824, tib: 1099511627776 };
+  return Math.round(parseFloat(m[1]) * (mul[m[2] || "b"] || 1));
+}
 const relTime = (s) => {
   if (!s) return "";
   const d = (Date.now() - new Date(s)) / 1000;
@@ -465,17 +474,21 @@ const linkEl = (t, fn) => { const a = el("a", {}, t); a.onclick = fn; return a; 
 let bucketPrefix = "";
 async function bucketObjects(v, b) {
   const fi = el("input", { type: "file", multiple: "true", style: "display:none" });
-  fi.onchange = () => doUpload(b, [...fi.files]);
+  fi.onchange = () => doUpload(b, [...fi.files].map((f) => ({ file: f, path: f.name })));
+  const fd = el("input", { type: "file", multiple: "true", style: "display:none" });
+  fd.webkitdirectory = true;
+  fd.onchange = () => doUpload(b, [...fd.files].map((f) => ({ file: f, path: f.webkitRelativePath || f.name })));
   const tb = el("div", { class: "toolbar" },
     el("div", { class: "search" }, ic(ICON.search), el("input", { placeholder: "Filter this folder…", oninput: (e) => filterRows(e.target.value) })),
     el("button", { class: "ghost", onclick: render }, ic(ICON.refresh)),
     el("div", { class: "grow" }),
+    el("button", { class: "ghost", onclick: () => fd.click() }, ic(ICON.folder), "Upload folder"), fd,
     el("button", { class: "primary", onclick: () => fi.click() }, ic(ICON.up), "Upload"), fi);
   v.append(tb);
   const drop = el("div", { id: "drop" });
   ["dragenter", "dragover"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("hot"); }));
   ["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("hot"); }));
-  drop.addEventListener("drop", (e) => doUpload(b, [...e.dataTransfer.files]));
+  drop.addEventListener("drop", (e) => { e.preventDefault(); doUpload(b, dropEntries(e.dataTransfer)); });
   drop.append(el("div", { id: "uplist" }));
   v.append(drop);
 
@@ -544,17 +557,43 @@ function filterRows(q) {
   q = q.toLowerCase();
   document.querySelectorAll("#view tbody tr[data-name]").forEach((tr) => { tr.style.display = !q || tr.dataset.name.includes(q) ? "" : "none"; });
 }
-async function doUpload(b, files) {
-  if (!files.length) return;
+// dropEntries turns a drop DataTransfer into [{file, path}], walking dropped
+// directories (webkitGetAsEntry must be called synchronously here).
+function dropEntries(dt) {
+  const roots = [...(dt.items || [])]
+    .map((it) => (it.webkitGetAsEntry ? it.webkitGetAsEntry() : null))
+    .filter(Boolean);
+  if (!roots.length) return Promise.resolve([...dt.files].map((f) => ({ file: f, path: f.name })));
+  const out = [];
+  const readAll = (rd) => new Promise((res) => {
+    const acc = [];
+    const step = () => rd.readEntries((batch) => { if (!batch.length) return res(acc); acc.push(...batch); step(); }, () => res(acc));
+    step();
+  });
+  const fileOf = (e) => new Promise((res, rej) => e.file(res, rej));
+  async function walk(entry, prefix) {
+    if (entry.isFile) { out.push({ file: await fileOf(entry), path: prefix + entry.name }); }
+    else if (entry.isDirectory) { for (const c of await readAll(entry.createReader())) await walk(c, prefix + entry.name + "/"); }
+  }
+  return (async () => { for (const r of roots) await walk(r, ""); return out; })();
+}
+
+async function doUpload(b, entriesOrPromise) {
+  const entries = await entriesOrPromise;
+  if (!entries.length) return;
   const list = $("#uplist");
-  for (const f of files) {
-    const row = el("div", { class: "up" }, ic(ICON.file), el("span", {}, f.name), el("span", { class: "bar" }, el("span", {})));
+  let ok = 0, fail = 0;
+  for (const { file, path } of entries) {
+    const row = el("div", { class: "up" }, ic(ICON.file), el("span", {}, path), el("span", { class: "bar" }, el("span", {})));
     list.append(row);
     const fill = row.querySelector(".bar>span");
-    try { await upload(b + "/" + bucketPrefix + f.name, f, (p) => (fill.style.width = (p * 100).toFixed(0) + "%")); fill.style.width = "100%"; row.style.opacity = ".5"; }
-    catch (e) { toast(f.name + ": " + e.message, "err"); row.remove(); }
+    try {
+      await upload(b + "/" + bucketPrefix + path, file, (p) => (fill.style.width = (p * 100).toFixed(0) + "%"));
+      fill.style.width = "100%"; row.style.opacity = ".5"; ok++;
+    } catch (e) { toast(path + ": " + e.message, "err"); row.remove(); fail++; }
   }
-  toast("Upload complete", "ok"); setTimeout(render, 400);
+  toast(`Uploaded ${ok}${fail ? ", " + fail + " failed" : ""}`, fail ? "err" : "ok");
+  setTimeout(render, 400);
 }
 async function dl(b, key, query) {
   try {
@@ -702,6 +741,32 @@ async function bucketSettings(v, b) {
         + "For cross-origin playback in a browser you also need CORS (below)."));
   }
 
+  // --- Quota ---
+  {
+    let qb = 0, qo = 0;
+    try { const r = await api("GET", "/" + b, { query: { quota: "" } }); if (r.ok) { const j = await r.json(); qb = j.bytes || 0; qo = j.objects || 0; } } catch {}
+    const bytesIn = el("input", { value: qb ? fmtSize(qb) : "", placeholder: "e.g. 20 GB — blank = no limit", style: "max-width:260px" });
+    const objIn = el("input", { type: "number", min: "0", value: qo || "", placeholder: "max objects — blank = no limit", style: "max-width:260px" });
+    sec("Quota",
+      el("div", { class: "kv", style: "grid-template-columns:auto 1fr;max-width:520px" },
+        el("div", { class: "k" }, "Max size"), bytesIn,
+        el("div", { class: "k" }, "Max objects"), objIn),
+      el("div", { class: "toolbar" },
+        el("button", { class: "primary sm", onclick: async () => {
+          const bytes = parseSize(bytesIn.value);
+          if (Number.isNaN(bytes)) return toast("Size not understood — use e.g. 20 GB", "err");
+          try {
+            await must(await api("PUT", "/" + b, { query: { quota: "" }, contentType: "application/json",
+              body: JSON.stringify({ bytes, objects: Number(objIn.value) || 0 }) }));
+            toast("Quota saved", "ok"); render();
+          } catch (e) { toast(e.message, "err"); }
+        } }, "Save"),
+        el("button", { class: "danger sm", onclick: async () => {
+          try { await api("DELETE", "/" + b, { query: { quota: "" } }); toast("Quota removed", "ok"); render(); } catch (e) { toast(e.message, "err"); }
+        } }, "Remove")),
+      el("p", { class: "muted small" }, "Soft limit checked against the last background scan, so a burst can briefly overshoot. Writes past the limit get <code>403 QuotaExceeded</code>."));
+  }
+
   // versioning
   let vstat = "";
   try { vstat = t(parseXml(await (await api("GET", "/" + b, { query: { versioning: "" } })).text()), "Status"); } catch {}
@@ -828,8 +893,23 @@ async function viewMonitoring(v) {
   const tile = (k, val) => tiles.append(el("div", { class: "tile" }, el("div", { class: "k" }, k), el("div", { class: "v" }, String(val))));
   tile("Mode", j.mode); tile("Drives", j.drives); tile("Parity", j.parity ?? "—");
   tile("Total space", fmtSize(j.totalSpace) || "—"); tile("Free space", fmtSize(j.freeSpace) || "—");
-  tile("Users", j.users); tile("Policies", j.policies); tile("Region", j.region);
+  tile("Access keys", j.users + (j.serviceAccounts ? " + " + j.serviceAccounts + " svc" : "")); tile("Policies", j.policies); tile("Region", j.region);
   v.append(tiles);
+
+  let du = null;
+  try { du = await (await api("GET", "/gostore/admin/v1/datausage")).json(); } catch {}
+  if (du && du.buckets && Object.keys(du.buckets).length) {
+    v.append(el("h3", { style: "margin:24px 0 8px;font-size:15px" }, "Usage by bucket"));
+    const tb = el("tbody");
+    for (const [name, u] of Object.entries(du.buckets).sort())
+      tb.append(el("tr", {}, el("td", {}, el("code", {}, name)), el("td", {}, String(u.objects)), el("td", {}, fmtSize(u.bytes))));
+    tb.append(el("tr", {}, el("td", {}, el("b", {}, "Total")), el("td", {}, el("b", {}, String(du.totalObjects))), el("td", {}, el("b", {}, fmtSize(du.totalBytes)))));
+    v.append(el("div", { class: "card" }, el("table", {}, el("thead", {}, el("tr", {}, el("th", {}, "Bucket"), el("th", {}, "Objects"), el("th", {}, "Size"))), tb)));
+    v.append(el("p", { class: "muted small" }, "From the last background scan (", relTime(du.lastUpdate), ")."));
+  }
+  v.append(el("p", { class: "muted small", style: "margin-top:14px" },
+    "Prometheus metrics: ", el("code", {}, location.origin + "/gostore/metrics"),
+    " (open by default; set ", el("code", {}, "GOSTORE_METRICS_TOKEN"), " to require a bearer token)."));
   const row = el("div", { class: "toolbar" });
   row.append(el("button", { onclick: async (e) => {
     e.target.disabled = true;
@@ -907,7 +987,7 @@ const DOCS = [
     ]));
     c.append(callout("HTTPS", "Put a TLS terminator (Caddy, nginx, your PaaS) in front of the API for production. SDKs will refuse to send credentials over plain HTTP unless you explicitly allow it.", "warn"));
     c.append(el("h3", {}, "2. Create a bucket and upload"));
-    c.append(P("From this console: Buckets → Create bucket, then open it and drag files in — files over 16&nbsp;MiB upload as a multipart transfer (parts in parallel, each retried on failure). Open any object → <b>Preview</b> to play video/audio (streamed via range requests) or view images, PDFs and text inline. From the CLI:"));
+    c.append(P("From this console: Buckets → Create bucket, then open it and drag files (or a whole folder) in — files over 16&nbsp;MiB upload as a multipart transfer (parts in parallel, each retried on failure); a dropped folder keeps its structure as key prefixes. Open any object → <b>Preview</b> to play video/audio (streamed via range requests) or view images, PDFs and text inline. From the CLI:"));
     c.append(codeBlock(
 `aws --endpoint-url ${x.origin} --region ${x.region} \\
   s3 mb s3://my-bucket
@@ -1248,6 +1328,17 @@ new PutObjectCommand({ Bucket: "b", Key: "k", Body: buf, ServerSideEncryption: "
       ["POST /gostore/admin/v1/pool/decommission?set=N", "—", "drain set N onto the others, then it can be removed"],
       ["POST /gostore/admin/v1/pool/rebalance", "—", "relocate objects that no longer hash to the set they live on"],
     ]));
+    c.append(el("h3", {}, "Not under /admin — no auth"));
+    c.append(TBL(["Method & path", "Purpose"], [
+      ["GET /gostore/metrics", "Prometheus exposition (request counts, capacity, per-bucket usage). Open unless <code>GOSTORE_METRICS_TOKEN</code> is set (then send <code>Authorization: Bearer &lt;token&gt;</code>)."],
+      ["GET /gostore/health/persistence", "is the data volume persistent? bucket/user counts"],
+    ]));
+    c.append(el("h3", {}, "Per-bucket quota (S3-style sub-resource)"));
+    c.append(TBL(["Method & path", "Body", "Purpose"], [
+      ["GET /{bucket}?quota", "—", "current <code>{bytes, objects}</code> (0 = no limit)"],
+      ["PUT /{bucket}?quota", "<code>{\"bytes\":N,\"objects\":M}</code>", "set a soft quota (checked against the last scan)"],
+      ["DELETE /{bucket}?quota", "—", "remove the quota"],
+    ]));
     c.append(el("h3", {}, "Example — curl with SigV4"));
     c.append(codeBlock(
 `AK=${x.ak}; SK=<secret>
@@ -1306,6 +1397,7 @@ GOSTORE_CLUSTER_SELF=http://node2:9000 gostore server \\
       ["GOSTORE_KMS_MASTER_KEY", "base64 of 32 bytes for SSE-S3; auto-generated to <code>.gostore.sys/kms/master.key</code> if unset"],
       ["GOSTORE_LOG_LEVEL / GOSTORE_LOG_JSON", "<code>debug|info|warn|error</code> / <code>1</code> for JSON logs"],
       ["GOSTORE_NO_CONTENT_TYPE_SNIFF", "set to <code>1</code> to stop guessing an object's Content-Type from its key extension when the client sent none / <code>application/octet-stream</code>"],
+      ["GOSTORE_METRICS_TOKEN", "when set, <code>GET /gostore/metrics</code> requires <code>Authorization: Bearer &lt;token&gt;</code> (otherwise the endpoint is open)"],
     ]));
     c.append(el("h3", {}, "Background work & erasure tuning"));
     c.append(TBL(["Variable", "Default", "Purpose"], [

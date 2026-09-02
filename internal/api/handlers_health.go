@@ -9,10 +9,54 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/lojadopocket/gostore/internal/metrics"
 	"github.com/lojadopocket/gostore/internal/object"
 )
 
 var disableSelfTest = os.Getenv("GOSTORE_DISABLE_SELFTEST") == "1"
+
+// metricsToken, when set, requires "Authorization: Bearer <token>" on
+// GET /gostore/metrics. Unset = the endpoint is open (it exposes only
+// counts and capacity, no object data).
+var metricsToken = os.Getenv("GOSTORE_METRICS_TOKEN")
+
+// handleMetrics serves Prometheus exposition at /gostore/metrics.
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if metricsToken != "" && r.Header.Get("Authorization") != "Bearer "+metricsToken {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	ctx := r.Context()
+	si, _ := s.obj.StorageInfo(ctx)
+	hr := s.obj.Health(ctx, object.HealthOptions{})
+
+	var capacity, free uint64
+	online := 0
+	for _, d := range si.Disks {
+		capacity += d.TotalSpace
+		free += d.FreeSpace
+		if d.State == "ok" || d.State == "" {
+			online++
+		}
+	}
+	g := metrics.Gauges{
+		Mode:          si.Backend.Type,
+		DisksTotal:    len(si.Disks),
+		DisksOnline:   online,
+		CapacityBytes: capacity,
+		FreeBytes:     free,
+		HealingDrives: hr.HealingDrives,
+		Healthy:       hr.Healthy,
+	}
+	if u := s.scan.Usage(); u != nil {
+		for name, bu := range u.Buckets {
+			g.Buckets = append(g.Buckets, metrics.BucketUsage{Bucket: name, Objects: bu.Objects, Bytes: bu.Bytes})
+		}
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	metrics.WritePrometheus(w, g)
+}
 
 // handleHealthLive is a liveness probe: the process is up and serving.
 func (s *Server) handleHealthLive(w http.ResponseWriter, _ *http.Request) {

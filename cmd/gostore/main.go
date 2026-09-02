@@ -34,6 +34,7 @@ import (
 	"github.com/lojadopocket/gostore/internal/iam"
 	"github.com/lojadopocket/gostore/internal/kms"
 	"github.com/lojadopocket/gostore/internal/logger"
+	"github.com/lojadopocket/gostore/internal/metrics"
 	"github.com/lojadopocket/gostore/internal/object"
 	fsbackend "github.com/lojadopocket/gostore/internal/object/fs"
 	"github.com/lojadopocket/gostore/internal/scanner"
@@ -43,6 +44,7 @@ import (
 var version = "0.3.0-m3"
 
 func main() {
+	metrics.SetVersion(version)
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
