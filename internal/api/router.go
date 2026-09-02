@@ -285,7 +285,7 @@ func (s *Server) dispatchObject(w http.ResponseWriter, r *http.Request, bucket, 
 			s.handleListObjectParts(w, r, bucket, object)
 			return
 		}
-		if has("preview") {
+		if has("preview") || has("img") || has("w") || has("h") {
 			s.handleObjectPreview(w, r, bucket, object)
 			return
 		}

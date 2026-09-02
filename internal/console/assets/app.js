@@ -1361,7 +1361,7 @@ const putUrl = await getSignedUrl(s3, new PutObjectCommand({ Bucket: "b", Key: "
       ["CopyObject / UploadPartCopy", "<code>x-amz-metadata-directive</code>"],
       ["ListObjectsV2 / ListObjects / ListObjectVersions", "prefix, delimiter, pagination"],
       ["CreateMultipartUpload … CompleteMultipartUpload", "full multipart, min part 5 MiB"],
-      ["GET /{bucket}/{key}?preview[=N]", "gostore extra: server-scaled JPEG thumbnail of an image object (longest side N px, default 480). Needs <code>s3:GetObject</code>."],
+      ["GET /{bucket}/{key}?w=&h=&fit=&format=&q=", "gostore extra: on-the-fly image render — <code>w</code>/<code>h</code> px, <code>fit=contain|cover</code> (cover centre-crops), <code>format=jpeg|png</code>, <code>q</code> 1–100. <code>?preview[=N]</code> is the legacy longest-side form. Result is cached in RAM per transform. Needs <code>s3:GetObject</code>."],
       ["Get/Put/DeleteObjectTagging", ""],
       ["Get/PutObjectRetention, Get/PutObjectLegalHold", "GOVERNANCE / COMPLIANCE / legal hold"],
     ]));
