@@ -1401,6 +1401,7 @@ const putUrl = await getSignedUrl(s3, new PutObjectCommand({ Bucket: "b", Key: "
     c.append(TBL(["Operation", "Notes"], [
       ["PutObject", "incl. <code>aws-chunked</code> streaming; <code>x-amz-server-side-encryption: AES256</code>; conditional <code>If-None-Match: *</code> / <code>If-None-Match: &quot;etag&quot;</code> / <code>If-Match: &quot;etag&quot;</code> → 412 (optimistic concurrency)"],
       ["POST /{bucket} (POST Object)", "browser form upload (<code>multipart/form-data</code>) with a base64 <code>policy</code> + SigV4 signature; supports <code>starts-with</code>, <code>eq</code>, <code>content-length-range</code> conditions, <code>${filename}</code>, <code>success_action_redirect</code>/<code>_status</code>. Upload straight from a web page with no backend proxy."],
+      ["Append (<code>x-amz-write-offset-bytes: N</code> on PutObject)", "appends the body iff <code>N</code> equals the current object size, else <code>409 InvalidWriteOffset</code>; returns <code>x-amz-object-size</code>. Concurrency-safe (optimistic — a racing append 409s and retries). Read-modify-write, so the target caps at <code>GOSTORE_APPEND_MAX</code> (64 MiB) — rotate beyond that. Non-versioned buckets only. MinIO / non-Express S3 don't have this."],
       ["GetObject / HeadObject", "Range, If-Match / If-None-Match / If-*-Since, <code>?versionId</code>; small hot objects served from RAM (<code>x-gostore-cache: HIT</code>)"],
       ["Per-object TTL", "gostore extra: on PutObject, <code>X-Gostore-Expires</code> (RFC3339) or <code>X-Gostore-Expire-After</code> (<code>72h</code>, <code>7d</code>, <code>2w</code>…) — the object 404s and is deleted after that instant, no lifecycle rule needed"],
       ["DeleteObject / DeleteObjects", "versioned delete adds a marker; <code>x-amz-bypass-governance-retention</code>"],
@@ -1695,6 +1696,7 @@ GOSTORE_CLUSTER_SELF=http://node2:9000 gostore server \\
       ["GOSTORE_OBJ_CACHE", "134217728", "byte budget for the in-RAM hot-object cache (whole-object GET/HEAD of small current-version objects); <code>0</code> disables"],
       ["GOSTORE_OBJ_CACHE_MAX_OBJ", "1048576", "largest object eligible for the RAM cache"],
       ["GOSTORE_OBJ_CACHE_TTL", "10s", "how long a cached object may be served before re-fetch (bounds staleness after a write on another cluster node)"],
+      ["GOSTORE_APPEND_MAX", "67108864", "largest size an append target (<code>x-amz-write-offset-bytes</code>) may reach — append is read-modify-write"],
     ]));
     c.append(el("h3", {}, "Built-in HTTPS (Let's Encrypt)"));
     c.append(P("Set <code>GOSTORE_TLS_DOMAIN</code> and gostore obtains and renews its own certificate — no nginx/Caddy in front. Point <code>GOSTORE_ADDRESS</code> at <code>:443</code>, publish port 80 as well (ACME HTTP-01 challenge + a redirect to https). MinIO can't do this."));

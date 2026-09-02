@@ -36,6 +36,13 @@ func (s *Server) handlePutObject(w http.ResponseWriter, r *http.Request, bucket,
 		return
 	}
 
+	// Append: x-amz-write-offset-bytes turns this PUT into an append at the
+	// given offset (which must equal the current object size).
+	if r.Header.Get("x-amz-write-offset-bytes") != "" {
+		s.handleAppendObject(w, r, bucket, key, size)
+		return
+	}
+
 	opts := s.vopts(bucket, r)
 	opts.UserDefined = extractMetadata(r, key)
 	if v := r.Header.Get("x-amz-tagging"); v != "" {
