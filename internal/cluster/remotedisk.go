@@ -16,26 +16,51 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/lojadopocket/gostore/internal/storage"
 )
 
-// RemoteDisk is an erasure.Disk backed by a peer node's internal RPC.
+// RemoteDisk is an erasure.Disk backed by a peer node's internal RPC. Small
+// unary ops go over a shared multiplexed connection (grid); bulk streaming
+// (CreateFile / ReadFileStream) uses its own pooled HTTP request. If the
+// peer doesn't speak grid, every op transparently falls back to HTTP.
 type RemoteDisk struct {
 	base   string // e.g. https://node2:9000
 	idx    int
 	secret string
 	hc     *http.Client
+	grid   *gridConn
+}
+
+// gridConns shares one multiplexed connection per (base, secret).
+var (
+	gridMu    sync.Mutex
+	gridConns = map[string]*gridConn{}
+)
+
+func getGridConn(base, secret string) *gridConn {
+	gridMu.Lock()
+	defer gridMu.Unlock()
+	k := base + "\x00" + secret
+	if g := gridConns[k]; g != nil {
+		return g
+	}
+	g := newGridConn(base, secret)
+	gridConns[k] = g
+	return g
 }
 
 // NewRemoteDisk builds a client for disk `idx` on the peer at base.
 func NewRemoteDisk(base string, idx int, secret string) *RemoteDisk {
+	base = strings.TrimRight(base, "/")
 	return &RemoteDisk{
-		base:   strings.TrimRight(base, "/"),
+		base:   base,
 		idx:    idx,
 		secret: secret,
 		hc:     &http.Client{Timeout: 90 * time.Second},
+		grid:   getGridConn(base, secret),
 	}
 }
 
@@ -46,6 +71,11 @@ func (r *RemoteDisk) Index() int     { return r.idx }
 func (r *RemoteDisk) IsOnline() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+	if _, err := r.grid.call(ctx, "ping", r.q(nil), nil); err == nil {
+		return true
+	} else if err != errGridUnavailable && ctx.Err() == nil {
+		// grid answered with a real error only if the peer is reachable
+	}
 	req, _ := r.newReq(ctx, "ping", nil, nil)
 	resp, err := r.hc.Do(req)
 	if err != nil {
@@ -53,6 +83,48 @@ func (r *RemoteDisk) IsOnline() bool {
 	}
 	_ = resp.Body.Close()
 	return resp.StatusCode == http.StatusOK
+}
+
+// q returns the base query (disk index) plus extras.
+func (r *RemoteDisk) q(extra url.Values) url.Values {
+	out := url.Values{"disk": {strconv.Itoa(r.idx)}}
+	for k, vs := range extra {
+		for _, v := range vs {
+			out.Add(k, v)
+		}
+	}
+	return out
+}
+
+// unary runs one small op: multiplexed grid first, HTTP on fallback. Returns
+// the raw response body.
+func (r *RemoteDisk) unary(ctx context.Context, op string, extra url.Values, body []byte) ([]byte, error) {
+	out, err := r.grid.call(ctx, op, r.q(extra), body)
+	if err == nil {
+		return out, nil
+	}
+	if err != errGridUnavailable {
+		return nil, err
+	}
+	// HTTP fallback
+	var rd io.Reader
+	if body != nil {
+		rd = bytes.NewReader(body)
+	}
+	req, rerr := r.newReq(ctx, op, extra, rd)
+	if rerr != nil {
+		return nil, rerr
+	}
+	resp, rerr := r.hc.Do(req)
+	if rerr != nil {
+		return nil, rerr
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, decodeErr(resp.StatusCode, string(b))
+	}
+	return io.ReadAll(resp.Body)
 }
 
 func (r *RemoteDisk) newReq(ctx context.Context, op string, q url.Values, body io.Reader) (*http.Request, error) {
@@ -73,31 +145,21 @@ func (r *RemoteDisk) newReq(ctx context.Context, op string, q url.Values, body i
 	return req, nil
 }
 
-func (r *RemoteDisk) call(ctx context.Context, op string, q url.Values, body io.Reader, out any) error {
-	req, err := r.newReq(ctx, op, q, body)
+func (r *RemoteDisk) call(ctx context.Context, op string, extra url.Values, body []byte, out any) error {
+	resp, err := r.unary(ctx, op, extra, body)
 	if err != nil {
 		return err
-	}
-	resp, err := r.hc.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return decodeErr(resp.StatusCode, string(b))
 	}
 	if out != nil {
-		return json.NewDecoder(resp.Body).Decode(out)
+		return json.Unmarshal(resp, out)
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
 }
 
 // --- erasure.Disk methods -------------------------------------------------
 
 func (r *RemoteDisk) MakeVol(ctx context.Context, bucket string) error {
-	return r.call(ctx, "makevol", url.Values{"bucket": {bucket}}, bytes.NewReader(nil), nil)
+	return r.call(ctx, "makevol", url.Values{"bucket": {bucket}}, nil, nil)
 }
 
 func (r *RemoteDisk) StatVol(ctx context.Context, bucket string) (storage.VolInfo, error) {
@@ -113,28 +175,15 @@ func (r *RemoteDisk) ListVols(ctx context.Context) ([]storage.VolInfo, error) {
 }
 
 func (r *RemoteDisk) DeleteVol(ctx context.Context, bucket string, force bool) error {
-	return r.call(ctx, "deletevol", url.Values{"bucket": {bucket}, "force": {strconv.FormatBool(force)}}, bytes.NewReader(nil), nil)
+	return r.call(ctx, "deletevol", url.Values{"bucket": {bucket}, "force": {strconv.FormatBool(force)}}, nil, nil)
 }
 
 func (r *RemoteDisk) WriteAll(ctx context.Context, bucket, object string, data []byte) error {
-	return r.call(ctx, "writeall", url.Values{"bucket": {bucket}, "object": {object}}, bytes.NewReader(data), nil)
+	return r.call(ctx, "writeall", url.Values{"bucket": {bucket}, "object": {object}}, data, nil)
 }
 
 func (r *RemoteDisk) ReadAll(ctx context.Context, bucket, object string) ([]byte, error) {
-	req, err := r.newReq(ctx, "readall", url.Values{"bucket": {bucket}, "object": {object}}, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := r.hc.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, decodeErr(resp.StatusCode, string(b))
-	}
-	return io.ReadAll(resp.Body)
+	return r.unary(ctx, "readall", url.Values{"bucket": {bucket}, "object": {object}}, nil)
 }
 
 func (r *RemoteDisk) CreateFile(ctx context.Context, bucket, object string, size int64, rd io.Reader) error {
@@ -182,13 +231,13 @@ func (r *RemoteDisk) RenameDir(ctx context.Context, srcBucket, srcObject, dstBuc
 	return r.call(ctx, "renamedir", url.Values{
 		"srcBucket": {srcBucket}, "srcObject": {srcObject},
 		"dstBucket": {dstBucket}, "dstObject": {dstObject},
-	}, bytes.NewReader(nil), nil)
+	}, nil, nil)
 }
 
 func (r *RemoteDisk) Delete(ctx context.Context, bucket, object string, recursive bool) error {
 	return r.call(ctx, "delete", url.Values{
 		"bucket": {bucket}, "object": {object}, "recursive": {strconv.FormatBool(recursive)},
-	}, bytes.NewReader(nil), nil)
+	}, nil, nil)
 }
 
 func (r *RemoteDisk) ListDir(ctx context.Context, bucket, dir string) ([]string, error) {
