@@ -65,6 +65,14 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusAccepted, map[string]any{"started": true})
 	case path == "readonly":
 		s.handleAdminReadOnly(w, r)
+	case path == "snapshot" && r.Method == http.MethodPost:
+		s.adminSnapshotCreate(w, r)
+	case path == "snapshot" && r.Method == http.MethodDelete:
+		s.adminSnapshotDelete(w, r)
+	case path == "snapshots" && r.Method == http.MethodGet:
+		s.adminSnapshotList(w, r)
+	case path == "snapshot/restore" && r.Method == http.MethodPost:
+		s.adminSnapshotRestore(w, r)
 	case path == "audit" && r.Method == http.MethodGet:
 		s.handleAdminAudit(w, r)
 	case path == "audit/verify" && r.Method == http.MethodGet:

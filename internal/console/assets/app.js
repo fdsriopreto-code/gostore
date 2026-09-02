@@ -1003,6 +1003,43 @@ async function bucketSettings(v, b) {
         } }, "Disable") : null));
   }
 
+  // --- Snapshots (point-in-time restore) ---
+  {
+    const sw = el("div", { class: "card", style: "margin:20px 0" });
+    const head = el("div", { class: "row", style: "justify-content:space-between;align-items:center" },
+      el("h3", { style: "margin:0;font-size:15px" }, "Snapshots — time travel"),
+      el("button", { class: "primary sm", onclick: async () => {
+        try { const j = await (await must(await api("POST", "/gostore/admin/v1/snapshot", { query: { bucket: b } }))).json(); toast("Snapshot " + j.id + " (" + j.objects + " objects)", "ok"); render(); }
+        catch (e) { toast(e.message, "err"); }
+      } }, ic(ICON.clock || ICON.info), "Take snapshot now"));
+    sw.append(head);
+    sw.append(el("p", { class: "muted small" }, "Records the version of every object right now. A restore rolls the whole bucket back to that instant — non-destructively (every change is a new version). Needs versioning enabled."));
+    const list = el("div"); sw.append(list);
+    (async () => {
+      let snaps = [];
+      try { snaps = await (await api("GET", "/gostore/admin/v1/snapshots", { query: { bucket: b } })).json(); } catch {}
+      if (!snaps.length) { list.append(el("p", { class: "muted small" }, "No snapshots yet.")); return; }
+      const tb = el("tbody");
+      for (const s of snaps) {
+        tb.append(el("tr", {},
+          el("td", {}, el("code", { style: "font-size:11.5px" }, s.id)),
+          el("td", { class: "muted" }, relTime(s.createdAt)),
+          el("td", { class: "num muted" }, s.objects + " obj / " + fmtSize(s.bytes)),
+          el("td", { class: "act" },
+            el("button", { class: "ghost sm", onclick: async () => {
+              try { const p = await (await api("POST", "/gostore/admin/v1/snapshot/restore", { query: { bucket: b, id: s.id, dryRun: "1" } })).json();
+                if (!confirm("Restore bucket \"" + b + "\" to " + s.id + "?\n\n" + p.restored + " objects rolled back, " + p.removed + " newer objects removed, " + p.unchanged + " unchanged.\n\nNon-destructive (creates new versions).")) return;
+                const r = await (await must(await api("POST", "/gostore/admin/v1/snapshot/restore", { query: { bucket: b, id: s.id } }))).json();
+                toast("Restored: " + r.restored + " back, " + r.removed + " removed", "ok"); render();
+              } catch (e) { toast(e.message, "err"); }
+            } }, "Restore"),
+            el("button", { class: "ghost sm danger", onclick: async () => { try { await api("DELETE", "/gostore/admin/v1/snapshot", { query: { bucket: b, id: s.id } }); render(); } catch (e) { toast(e.message, "err"); } } }, "Delete"))));
+      }
+      list.append(el("div", { class: "card", style: "margin-top:8px" }, el("table", {}, el("thead", {}, el("tr", {}, ...["Snapshot", "Taken", "Size", ""].map((h) => el("th", {}, h)))), tb)));
+    })();
+    v.append(sw);
+  }
+
   // --- Danger zone ---
   v.append(el("h3", { style: "margin:28px 0 8px;font-size:15px;color:var(--red,#c0392b)" }, "Danger zone"));
   v.append(el("div", { class: "toolbar" }, el("button", { class: "danger sm", onclick: async () => {
@@ -1652,6 +1689,10 @@ new PutObjectCommand({ Bucket: "b", Key: "k", Body: buf, ServerSideEncryption: "
       ["GET /gostore/admin/v1/scrub", "—", "deep-scrub progress (running, objectsScanned, objectsRepaired, unrecoverable)"],
       ["POST /gostore/admin/v1/scrub", "—", "force a full deep scrub now (verify + repair every object)"],
       ["GET/POST /gostore/admin/v1/readonly", "<code>{enabled:bool}</code>", "read-only mode — reject every write with <code>503 ServerReadOnly</code> while still serving reads. Entered automatically when write quorum is impossible (auto-clears); a manual hold does not."],
+      ["POST /gostore/admin/v1/snapshot?bucket=X", "—", "record the version of every live object now (bucket versioning required). Returns <code>{id, objects, bytes}</code>."],
+      ["GET /gostore/admin/v1/snapshots?bucket=X", "—", "list snapshots for a bucket"],
+      ["POST /gostore/admin/v1/snapshot/restore?bucket=X&id=Y[&dryRun=1]", "—", "roll the whole bucket back to snapshot Y — non-destructive (each rollback is a new version; newer objects get a delete marker). <code>dryRun=1</code> returns the plan only."],
+      ["DELETE /gostore/admin/v1/snapshot?bucket=X&id=Y", "—", "delete a snapshot manifest"],
       ["GET /gostore/admin/v1/cluster", "—", "per-peer up/down as seen from this node (circuit-breaker view, kept fresh by a 15s monitor) + backend health"],
       ["GET /gostore/admin/v1/audit?limit=N&after=SEQ", "—", "tamper-evident audit log: every successful mutation as a hash-chained entry, also written to <code>&lt;vol0&gt;/.gostore.sys/audit/audit-YYYYMMDD.jsonl</code>"],
       ["GET /gostore/admin/v1/audit/verify", "—", "walk the chain; reports <code>{entries, intact, brokenAtSeq}</code> — any edited or removed entry breaks it"],

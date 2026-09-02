@@ -1,6 +1,7 @@
 package fs
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -387,6 +388,30 @@ func (f *FS) CopyObject(ctx context.Context, srcBucket, srcObject, dstBucket, ds
 	if err := f.ensureBucket(dstBucket); err != nil {
 		return object.ObjectInfo{}, err
 	}
+	// Version-aware copy (a specific source version, or a copy that must land
+	// as a new version): read the source fully, release its read lock, then
+	// write — for a same-object restore the reader's RLock would otherwise
+	// deadlock PutObject's write lock.
+	if srcOpts.VersionID != "" || dstOpts.Versioned || dstOpts.VersionSuspended {
+		gr, gerr := f.GetObjectNInfo(ctx, srcBucket, srcObject, nil, nil, object.ObjectOptions{VersionID: srcOpts.VersionID})
+		if gerr != nil {
+			return object.ObjectInfo{}, gerr
+		}
+		buf, rerr := io.ReadAll(gr)
+		ud := map[string]string{}
+		for k, v := range gr.ObjInfo.UserDefined {
+			ud[k] = v
+		}
+		_ = gr.Close()
+		if rerr != nil {
+			return object.ObjectInfo{}, rerr
+		}
+		return f.PutObject(ctx, dstBucket, dstObject,
+			object.NewPutObjReader(bytes.NewReader(buf), int64(len(buf)), int64(len(buf))),
+			object.ObjectOptions{UserDefined: ud, UserTags: dstOpts.UserTags,
+				Versioned: dstOpts.Versioned, VersionSuspended: dstOpts.VersionSuspended})
+	}
+
 	src, err := f.getInfoUnlocked(srcBucket, srcObject)
 	if err != nil {
 		return object.ObjectInfo{}, err

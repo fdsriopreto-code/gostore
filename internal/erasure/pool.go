@@ -397,9 +397,9 @@ func (p *Pool) DeleteObjects(ctx context.Context, bucket string, objs []object.O
 	return deleted, errs
 }
 
-func (p *Pool) CopyObject(ctx context.Context, srcBucket, srcObject, dstBucket, dstObject string, _ object.ObjectInfo, _, dstOpts object.ObjectOptions) (object.ObjectInfo, error) {
+func (p *Pool) CopyObject(ctx context.Context, srcBucket, srcObject, dstBucket, dstObject string, _ object.ObjectInfo, srcOpts, dstOpts object.ObjectOptions) (object.ObjectInfo, error) {
 	defer p.invalidateList(dstBucket)
-	src, err := p.GetObjectNInfo(ctx, srcBucket, srcObject, nil, nil, object.ObjectOptions{})
+	src, err := p.GetObjectNInfo(ctx, srcBucket, srcObject, nil, nil, object.ObjectOptions{VersionID: srcOpts.VersionID})
 	if err != nil {
 		return object.ObjectInfo{}, err
 	}
@@ -413,7 +413,10 @@ func (p *Pool) CopyObject(ctx context.Context, srcBucket, srcObject, dstBucket, 
 		ud = dstOpts.UserDefined
 	}
 	pr := object.NewPutObjReader(src, src.ObjInfo.Size, src.ObjInfo.Size)
-	return p.PutObject(ctx, dstBucket, dstObject, pr, object.ObjectOptions{UserDefined: ud, UserTags: dstOpts.UserTags})
+	return p.PutObject(ctx, dstBucket, dstObject, pr, object.ObjectOptions{
+		UserDefined: ud, UserTags: dstOpts.UserTags,
+		Versioned: dstOpts.Versioned, VersionSuspended: dstOpts.VersionSuspended,
+	})
 }
 
 // --- helpers -----------------------------------------------------
