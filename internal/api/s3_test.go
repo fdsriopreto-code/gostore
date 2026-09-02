@@ -896,3 +896,38 @@ func TestActivityFeed(t *testing.T) {
 		t.Fatalf("activity feed should not include health checks: %s", body)
 	}
 }
+
+func TestRotateSecretAndWhoami(t *testing.T) {
+	srv := newTestServer(t)
+	// create a user
+	body := []byte(`{"accessKey":"rotter01","secretKey":"origsecret1","policies":["readonly"]}`)
+	if r := doAs(t, srv, testAK, testSK, http.MethodPut, "/gostore/admin/v1/users", body); r.StatusCode != 200 {
+		t.Fatalf("add user: %d", r.StatusCode)
+	}
+	// whoami for that user (non-admin)
+	r := doAs(t, srv, "rotter01", "origsecret1", http.MethodGet, "/gostore/admin/v1/whoami", nil)
+	who := readBody(t, r)
+	if r.StatusCode != 200 || !strings.Contains(who, `"accessKey":"rotter01"`) || !strings.Contains(who, `"isAdmin":false`) {
+		t.Fatalf("whoami: %d %s", r.StatusCode, who)
+	}
+
+	// rotate the secret (admin)
+	r = doAs(t, srv, testAK, testSK, http.MethodPost, "/gostore/admin/v1/users/rotate-secret",
+		[]byte(`{"accessKey":"rotter01"}`))
+	rb := readBody(t, r)
+	if r.StatusCode != 200 {
+		t.Fatalf("rotate: %d %s", r.StatusCode, rb)
+	}
+	var out struct{ AccessKey, SecretKey string }
+	_ = json.Unmarshal([]byte(rb), &out)
+	if out.SecretKey == "" || out.SecretKey == "origsecret1" {
+		t.Fatalf("rotate returned no new secret: %s", rb)
+	}
+	// old secret rejected, new one works
+	if r := doAs(t, srv, "rotter01", "origsecret1", http.MethodGet, "/gostore/admin/v1/whoami", nil); r.StatusCode != 403 {
+		t.Fatalf("old secret should be rejected, got %d", r.StatusCode)
+	}
+	if r := doAs(t, srv, "rotter01", out.SecretKey, http.MethodGet, "/gostore/admin/v1/whoami", nil); r.StatusCode != 200 {
+		t.Fatalf("new secret should work, got %d", r.StatusCode)
+	}
+}

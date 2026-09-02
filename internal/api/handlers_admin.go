@@ -28,13 +28,21 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	if newBody != nil {
 		r.Body = newBody
 	}
-	if accessKey == "" || !s.iam.IsAllowed(accessKey, policy.Args{Action: "admin:*", BucketName: "*"}) {
+	path := strings.TrimPrefix(r.URL.Path, "/gostore/admin/v1/")
+	q := r.URL.Query()
+
+	isAdmin := accessKey != "" && s.iam.IsAllowed(accessKey, policy.Args{Action: "admin:*", BucketName: "*"})
+
+	// whoami is available to any authenticated caller (not just admins) so a
+	// key can inspect its own identity and effective policies.
+	if path == "whoami" && r.Method == http.MethodGet {
+		s.adminWhoami(w, accessKey, isAdmin)
+		return
+	}
+	if !isAdmin {
 		writeJSONError(w, http.StatusForbidden, "admin permission required")
 		return
 	}
-
-	path := strings.TrimPrefix(r.URL.Path, "/gostore/admin/v1/")
-	q := r.URL.Query()
 
 	switch {
 	case path == "info" && r.Method == http.MethodGet:
@@ -52,6 +60,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, u)
 	case path == "activity" && r.Method == http.MethodGet:
 		s.handleActivity(w, r)
+	case path == "users/rotate-secret" && r.Method == http.MethodPost:
+		s.adminRotateSecret(w, r)
 	case path == "pool" && r.Method == http.MethodGet:
 		s.adminPoolStatus(w)
 	case path == "pool/decommission" && r.Method == http.MethodPost:
@@ -225,6 +235,38 @@ func (s *Server) adminAddUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, iam.UserInfo{AccessKey: body.AccessKey, Policies: body.Policies, Status: "enabled"})
+}
+
+// adminRotateSecret gives a user a fresh secret key (same access key). Body:
+// {"accessKey":"...", "secretKey":"..."(optional)}. Returns it once.
+func (s *Server) adminRotateSecret(w http.ResponseWriter, r *http.Request) {
+	var body struct{ AccessKey, SecretKey string }
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.SecretKey == "" {
+		body.SecretKey = storage.NewID() + storage.NewID()[:8]
+	}
+	if err := s.iam.SetUserSecret(body.AccessKey, body.SecretKey); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"accessKey": body.AccessKey, "secretKey": body.SecretKey})
+}
+
+// adminWhoami reports the caller's own identity + effective policies.
+func (s *Server) adminWhoami(w http.ResponseWriter, accessKey string, isAdmin bool) {
+	id, ok := s.iam.Identity(accessKey)
+	out := map[string]any{"accessKey": accessKey, "isAdmin": isAdmin}
+	if ok {
+		out["isRoot"] = id.IsRoot
+		out["parentUser"] = id.ParentUser
+		out["policies"] = id.Policies
+		if !id.Expiry.IsZero() {
+			out["expiresAt"] = id.Expiry
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) adminAddSvcAcct(w http.ResponseWriter, r *http.Request, caller string) {

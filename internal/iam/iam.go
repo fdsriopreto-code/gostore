@@ -300,6 +300,23 @@ func (m *Manager) RemoveUser(accessKey string) error {
 	return m.flush()
 }
 
+// SetUserSecret replaces a user's secret key (key rotation). The access key
+// stays the same; the old secret stops working immediately.
+func (m *Manager) SetUserSecret(accessKey, newSecret string) error {
+	if len(newSecret) < 8 {
+		return ErrInvalidCred
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	u, ok := m.users[accessKey]
+	if !ok {
+		return ErrNoSuchUser
+	}
+	u.SecretKey = newSecret
+	m.users[accessKey] = u
+	return m.flush()
+}
+
 func (m *Manager) SetUserStatus(accessKey, status string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

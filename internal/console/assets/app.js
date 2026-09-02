@@ -932,10 +932,19 @@ async function viewKeys(v) {
     el("td", { class: "muted" }, "user"),
     el("td", {}, (u.policies || []).map((p) => el("span", { class: "pill" }, p))),
     el("td", {}, el("span", { class: "pill" + (u.status !== "disabled" ? " ok" : " warn") }, u.status || "enabled")),
-    el("td", { class: "act" }, el("button", { class: "danger sm", onclick: async () => {
-      if (!confirm("Delete user " + u.accessKey + "?")) return;
-      await api("DELETE", "/gostore/admin/v1/users", { query: { accessKey: u.accessKey } }); toast("Deleted", "ok"); render();
-    } }, ic(ICON.trash)))));
+    el("td", { class: "act" },
+      el("button", { class: "ghost sm", title: "Rotate secret key", onclick: async () => {
+        if (!confirm("Rotate the secret for " + u.accessKey + "? The old secret stops working immediately.")) return;
+        try {
+          const j = await (await must(await api("POST", "/gostore/admin/v1/users/rotate-secret", {
+            contentType: "application/json", body: JSON.stringify({ accessKey: u.accessKey }) }))).json();
+          credsModal(j.accessKey, j.secretKey, "New secret for an existing key — update your clients.");
+        } catch (e) { toast(e.message, "err"); }
+      } }, ic(ICON.refresh)),
+      el("button", { class: "danger sm", onclick: async () => {
+        if (!confirm("Delete user " + u.accessKey + "?")) return;
+        await api("DELETE", "/gostore/admin/v1/users", { query: { accessKey: u.accessKey } }); toast("Deleted", "ok"); render();
+      } }, ic(ICON.trash)))));
   for (const s of svcs) tb.append(el("tr", {},
     el("td", {}, el("div", { class: "nm" }, ic(ICON.key), el("code", {}, s.accessKey))),
     el("td", { class: "muted" }, "service account"),
@@ -946,7 +955,17 @@ async function viewKeys(v) {
     } }, ic(ICON.trash)))));
   v.append(el("div", { class: "card" }, el("table", {}, el("thead", {}, el("tr", {},
     el("th", {}, "Access key"), el("th", {}, "Type"), el("th", {}, "Policy"), el("th", {}, "Status"), el("th", {}))), tb)));
-  v.append(el("p", { class: "small muted", style: "margin-top:14px" }, "Policy language and STS are covered in ",
+
+  try {
+    const me = await (await api("GET", "/gostore/admin/v1/whoami")).json();
+    const pol = me.isRoot ? "root (full access)" : (me.policies && me.policies.length ? me.policies.join(", ") : "none");
+    v.append(el("p", { class: "small muted", style: "margin-top:14px" },
+      "You are signed in as ", el("code", {}, me.accessKey), " — ",
+      me.isAdmin ? "admin" : "not admin", " · policies: ", el("b", {}, pol),
+      me.parentUser ? " · parent: " + me.parentUser : ""));
+  } catch {}
+
+  v.append(el("p", { class: "small muted", style: "margin-top:6px" }, "Policy language and STS are covered in ",
     el("a", { onclick: () => go("docs/iam") }, "Documentation → IAM & Policies"), "."));
 }
 
@@ -1418,6 +1437,8 @@ new PutObjectCommand({ Bucket: "b", Key: "k", Body: buf, ServerSideEncryption: "
       ["POST /gostore/admin/v1/heal", "—", "reconstruct missing/corrupt shards (erasure)"],
       ["POST /gostore/admin/v1/scanner/run", "—", "run one scan pass now (lifecycle + usage + heal sample)"],
       ["GET /gostore/admin/v1/datausage", "—", "per-bucket object counts &amp; byte totals from the last scan"],
+      ["GET /gostore/admin/v1/whoami", "—", "<b>any authenticated key</b>: your identity, effective policies, admin?"],
+      ["POST /gostore/admin/v1/users/rotate-secret", "<code>{accessKey, secretKey?}</code>", "give an existing user a fresh secret (old one dies immediately)"],
       ["GET /gostore/admin/v1/activity?limit=N", "—", "last N HTTP requests (method, path, status, key, IP) — no external audit sink needed"],
       ["GET /gostore/admin/v1/pool", "—", "erasure-set layout + any running decommission/rebalance"],
       ["POST /gostore/admin/v1/pool/decommission?set=N", "—", "drain set N onto the others, then it can be removed"],
