@@ -33,6 +33,10 @@ type lifecycleRuleXML struct {
 	AbortIncompleteMultipartUpload *struct {
 		DaysAfterInitiation int `xml:"DaysAfterInitiation"`
 	} `xml:"AbortIncompleteMultipartUpload"`
+	Transition *struct {
+		Days         int    `xml:"Days"`
+		StorageClass string `xml:"StorageClass"` // a gostore tier name
+	} `xml:"Transition"`
 }
 
 func (s *Server) handleGetBucketLifecycle(w http.ResponseWriter, r *http.Request, bucket string) {
@@ -63,6 +67,12 @@ func (s *Server) handleGetBucketLifecycle(w http.ResponseWriter, r *http.Request
 			x.AbortIncompleteMultipartUpload = &struct {
 				DaysAfterInitiation int `xml:"DaysAfterInitiation"`
 			}{rr.AbortIncompleteMultipartDays}
+		}
+		if rr.TransitionTier != "" {
+			x.Transition = &struct {
+				Days         int    `xml:"Days"`
+				StorageClass string `xml:"StorageClass"`
+			}{rr.TransitionDays, rr.TransitionTier}
 		}
 		out.Rules = append(out.Rules, x)
 	}
@@ -100,6 +110,10 @@ func (s *Server) handlePutBucketLifecycle(w http.ResponseWriter, r *http.Request
 		}
 		if x.AbortIncompleteMultipartUpload != nil {
 			rule.AbortIncompleteMultipartDays = x.AbortIncompleteMultipartUpload.DaysAfterInitiation
+		}
+		if x.Transition != nil && x.Transition.StorageClass != "" {
+			rule.TransitionDays = x.Transition.Days
+			rule.TransitionTier = x.Transition.StorageClass
 		}
 		if rule.Status == "" {
 			rule.Status = "Enabled"

@@ -31,6 +31,13 @@ type XLMeta struct {
 	// blob after a grace period.
 	DataRef string `json:"dataRef,omitempty"`
 
+	// Tier / TierKey: the object's bytes were transitioned to a remote cold
+	// backend by a lifecycle rule. This xl.meta is a stub (no shard files);
+	// Size/ETag/ContentType describe the original object and a GET streams it
+	// back from Tier/TierKey.
+	Tier    string `json:"tier,omitempty"`
+	TierKey string `json:"tierKey,omitempty"`
+
 	Size    int64     `json:"size"`
 	ModTime time.Time `json:"modTime"`
 	ETag    string    `json:"etag"`

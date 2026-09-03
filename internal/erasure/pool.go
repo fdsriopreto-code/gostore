@@ -307,6 +307,10 @@ func (p *Pool) GetObjectNInfo(ctx context.Context, bucket, key string, rs *objec
 		oi.Size = length
 	}
 
+	if m.Tier != "" { // bytes live on a remote cold backend
+		return p.getTiered(ctx, m, oi, off, length)
+	}
+
 	if m.Compressed != "" {
 		// zstd isn't range-seekable: read the whole compressed stream, then
 		// decode and slice to the requested plaintext range.
@@ -368,8 +372,18 @@ func (p *Pool) DeleteObject(ctx context.Context, bucket, key string, opts object
 	lk := p.NewNSLock(bucket, key)
 	c, _ := lk.GetLock(ctx, 0)
 	defer lk.Unlock(c)
-	if err := p.locate(ctx, bucket, key).deleteObject(ctx, bucket, key); err != nil {
+	set := p.locate(ctx, bucket, key)
+	var tier, tierKey string
+	if m, merr := set.readMeta(ctx, bucket, key); merr == nil {
+		tier, tierKey = m.Tier, m.TierKey
+	}
+	if err := set.deleteObject(ctx, bucket, key); err != nil {
 		return object.ObjectInfo{}, mapErr(err)
+	}
+	if tier != "" {
+		if cl := tierClient(tier); cl != nil {
+			go func() { _ = cl.Delete(context.Background(), tierKey) }()
+		}
 	}
 	return object.ObjectInfo{Bucket: bucket, Name: key}, nil
 }

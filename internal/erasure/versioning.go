@@ -249,6 +249,10 @@ func (p *Pool) getVersionedOn(ctx context.Context, set *Set, bucket, key string,
 		oi.Size = length
 	}
 
+	if m.Tier != "" {
+		return p.getTiered(ctx, m, oi, off, length)
+	}
+
 	if m.Compressed != "" {
 		pr, pw := io.Pipe()
 		go func() { _ = pw.CloseWithError(set.getObjectMeta(ctx, bucket, dir, m, 0, m.Size, pw)) }()

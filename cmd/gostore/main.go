@@ -42,6 +42,7 @@ import (
 	"github.com/lojadopocket/gostore/internal/metrics"
 	"github.com/lojadopocket/gostore/internal/object"
 	fsbackend "github.com/lojadopocket/gostore/internal/object/fs"
+	"github.com/lojadopocket/gostore/internal/remotes3"
 	"github.com/lojadopocket/gostore/internal/scanner"
 	"github.com/lojadopocket/gostore/internal/storage"
 )
@@ -164,6 +165,7 @@ func runServer(args []string) error {
 		applyWalkKeysMax()
 		applyDirSync()
 		applyDedup()
+		applyTiers()
 		set, err := erasure.NewSet(spec.Disks)
 		if err != nil {
 			return fmt.Errorf("cluster erasure set: %w", err)
@@ -215,6 +217,7 @@ func runServer(args []string) error {
 	applyWalkKeysMax()
 	applyDirSync()
 	applyDedup()
+	applyTiers()
 
 	if cfg.SingleDisk() {
 		backend, err := fsbackend.New(cfg.VolumeGroups[0][0])
@@ -512,6 +515,31 @@ func applyDirSync() {
 	case "0", "false", "no", "off":
 		storage.SetDirSync(false)
 		logger.Warn("directory fsync disabled (GOSTORE_FSYNC=0) — the last write before a power loss may be lost")
+	}
+}
+
+// applyTiers registers remote cold-storage tiers from GOSTORE_TIER_<NAME>
+// env vars: "endpoint|region|bucket|accessKey|secretKey[|prefix]".
+func applyTiers() {
+	for _, kv := range os.Environ() {
+		name, val, _ := strings.Cut(kv, "=")
+		if !strings.HasPrefix(name, "GOSTORE_TIER_") || val == "" {
+			continue
+		}
+		tier := strings.ToLower(strings.TrimPrefix(name, "GOSTORE_TIER_"))
+		f := strings.Split(val, "|")
+		if len(f) < 5 {
+			logger.Warn("ignoring malformed tier (want endpoint|region|bucket|access|secret[|prefix])", "tier", tier)
+			continue
+		}
+		prefix := ""
+		if len(f) >= 6 {
+			prefix = f[5]
+		}
+		erasure.RegisterTier(tier, &remotes3.Client{
+			Endpoint: f[0], Region: f[1], Bucket: f[2], Access: f[3], Secret: f[4], Prefix: prefix,
+		})
+		logger.Info("cold tier registered", "tier", tier, "endpoint", f[0], "bucket", f[2])
 	}
 }
 

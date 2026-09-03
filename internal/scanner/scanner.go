@@ -220,18 +220,25 @@ type Report struct {
 	VersionsExpired int `json:"noncurrentVersionsExpired"`
 	UploadsAborted  int `json:"multipartUploadsAborted"`
 	ObjectsHealed   int `json:"objectsHealed"`
+	ObjectsTiered   int `json:"objectsTiered"`
 	Errors          int `json:"errors"`
 }
 
 func (r Report) nonZero() bool {
-	return r.ObjectsExpired+r.VersionsExpired+r.UploadsAborted+r.ObjectsHealed+r.Errors > 0
+	return r.ObjectsExpired+r.VersionsExpired+r.UploadsAborted+r.ObjectsHealed+r.ObjectsTiered+r.Errors > 0
 }
 func (r Report) args() []any {
 	return []any{
 		"buckets", r.BucketsScanned, "objectsExpired", r.ObjectsExpired,
 		"versionsExpired", r.VersionsExpired, "uploadsAborted", r.UploadsAborted,
-		"objectsHealed", r.ObjectsHealed, "errors", r.Errors,
+		"objectsHealed", r.ObjectsHealed, "objectsTiered", r.ObjectsTiered, "errors", r.Errors,
 	}
+}
+
+// objectTransitioner is implemented by the erasure backend: move an object's
+// bytes to a named remote cold tier and leave a stub.
+type objectTransitioner interface {
+	TransitionObject(ctx context.Context, bucket, key, tier string) error
 }
 
 // expRule is a lifecycle rule pre-parsed for the walk.
@@ -241,6 +248,8 @@ type expRule struct {
 	date       time.Time
 	noncurrent int
 	abortMPU   int
+	transDays  int
+	transTier  string
 }
 
 func enabledRules(rules []bucketcfg.LifecycleRule) []expRule {
@@ -250,7 +259,8 @@ func enabledRules(rules []bucketcfg.LifecycleRule) []expRule {
 			continue
 		}
 		er := expRule{prefix: r.Prefix, days: r.ExpirationDays,
-			noncurrent: r.NoncurrentVersionExpirationDays, abortMPU: r.AbortIncompleteMultipartDays}
+			noncurrent: r.NoncurrentVersionExpirationDays, abortMPU: r.AbortIncompleteMultipartDays,
+			transDays: r.TransitionDays, transTier: r.TransitionTier}
 		if r.ExpirationDate != "" {
 			if t, err := time.Parse(time.RFC3339, r.ExpirationDate); err == nil {
 				er.date = t
@@ -335,6 +345,7 @@ func (s *Scanner) walkBucket(ctx context.Context, bucket string, rules []expRule
 					rep.Errors++
 				}
 			}
+			expired := false
 			for _, r := range rules {
 				if (r.days <= 0 && r.date.IsZero()) || !strings.HasPrefix(o.Name, r.prefix) {
 					continue
@@ -348,8 +359,30 @@ func (s *Scanner) walkBucket(ctx context.Context, bucket string, rules []expRule
 					}
 				} else {
 					rep.ObjectsExpired++
+					expired = true
 				}
 				break
+			}
+			// Transition to a remote cold tier (only if not just expired).
+			if !expired {
+				if tr, ok := s.obj.(objectTransitioner); ok {
+					for _, r := range rules {
+						if r.transDays <= 0 || r.transTier == "" || !strings.HasPrefix(o.Name, r.prefix) {
+							continue
+						}
+						if now.Sub(o.ModTime) < time.Duration(r.transDays)*24*time.Hour {
+							continue
+						}
+						if err := tr.TransitionObject(ctx, bucket, o.Name, r.transTier); err != nil {
+							if !errors.Is(err, object.ErrObjectLocked) {
+								rep.Errors++
+							}
+						} else {
+							rep.ObjectsTiered++
+						}
+						break
+					}
+				}
 			}
 		}
 		if !li.IsTruncated {

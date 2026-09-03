@@ -188,6 +188,9 @@ func (s *Server) adminInfo(w http.ResponseWriter, r *http.Request) {
 	}
 	info["dedup"] = erasure.DedupEnabled()
 	info["readOnly"] = s.ro.on()
+	if tn := erasure.TierNames(); len(tn) > 0 {
+		info["tiers"] = tn
+	}
 	if km, ok := s.obj.(interface{ KMSMode() string }); ok {
 		info["kms"] = km.KMSMode()
 	}

@@ -66,6 +66,11 @@ type LifecycleRule struct {
 	ExpiredObjectDeleteMarker       bool   `json:"expiredObjectDeleteMarker,omitempty"`
 	NoncurrentVersionExpirationDays int    `json:"noncurrentVersionExpirationDays,omitempty"`
 	AbortIncompleteMultipartDays    int    `json:"abortIncompleteMultipartUploadDays,omitempty"`
+
+	// Transition moves an object's bytes to a remote cold tier (a name
+	// registered via GOSTORE_TIER_<NAME>) once it is TransitionDays old.
+	TransitionDays int    `json:"transitionDays,omitempty"`
+	TransitionTier string `json:"transitionTier,omitempty"`
 }
 
 // ReplicationRule copies matching objects to a destination bucket — local

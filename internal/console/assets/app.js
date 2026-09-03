@@ -965,7 +965,10 @@ async function bucketSettings(v, b) {
   await editor("Bucket policy", "policy", "application/json",
     JSON.stringify({ Version: "2012-10-17", Statement: [{ Effect: "Allow", Principal: "*", Action: ["s3:GetObject"], Resource: [`arn:aws:s3:::${b}/*`] }] }, null, 2));
   await editor("Lifecycle (ILM)", "lifecycle", "application/xml",
-    `<LifecycleConfiguration><Rule><ID>expire-logs</ID><Status>Enabled</Status><Filter><Prefix>logs/</Prefix></Filter><Expiration><Days>30</Days></Expiration></Rule></LifecycleConfiguration>`);
+    `<LifecycleConfiguration>
+  <Rule><ID>expire-logs</ID><Status>Enabled</Status><Filter><Prefix>logs/</Prefix></Filter><Expiration><Days>30</Days></Expiration></Rule>
+  <Rule><ID>tier-cold</ID><Status>Enabled</Status><Filter><Prefix>archive/</Prefix></Filter><Transition><Days>90</Days><StorageClass>cold</StorageClass></Transition></Rule>
+</LifecycleConfiguration>`);
   await editor("Replication", "replication", "application/json",
     JSON.stringify([{ id: "r1", prefix: "", destBucket: "backup", destEndpoint: "", deleteReplication: true }], null, 2));
   await editor("CORS", "cors", "application/xml",
@@ -1801,6 +1804,7 @@ GOSTORE_CLUSTER_SELF=http://node2:9000 gostore server \\
       ["GOSTORE_MAX_INFLIGHT_BYTES", "536870912", "cap on total request-body bytes in flight for writes; over it new writes get <code>503 SlowDown</code>"],
       ["GOSTORE_MEM_LIMIT_BYTES", "0", "when set, heap-in-use above this sheds new writes with 503 for ~5s (memory backpressure); <code>0</code> disables"],
       ["GOSTORE_DEDUP", "0", "set <code>1</code> for content-addressed dedup: byte-identical objects (erasure, non-SSE) share one set of shard files under <code>.gostore.sys/cas/&lt;sha256&gt;/</code>; unreferenced blobs are removed by a mark-and-sweep GC on the deep-scrub cadence. Server-side copies of identical content become near-free."],
+      ["GOSTORE_TIER_&lt;NAME&gt;", "—", "register a remote cold-storage tier: <code>endpoint|region|bucket|access|secret[|prefix]</code>. A lifecycle <code>&lt;Transition&gt;&lt;Days&gt;N&lt;/Days&gt;&lt;StorageClass&gt;name&lt;/StorageClass&gt;&lt;/Transition&gt;</code> rule then moves cold objects there (local stub, transparent GET rehydration, remote-delete on DELETE)."],
     ]));
     c.append(el("h3", {}, "Built-in HTTPS (Let's Encrypt)"));
     c.append(P("Set <code>GOSTORE_TLS_DOMAIN</code> and gostore obtains and renews its own certificate — no nginx/Caddy in front. Point <code>GOSTORE_ADDRESS</code> at <code>:443</code>, publish port 80 as well (ACME HTTP-01 challenge + a redirect to https). MinIO can't do this."));
