@@ -55,3 +55,17 @@ jobs:
         with:
           name: gostore-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/*
+
+  n8n-node:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: integrations/n8n-nodes-gostore
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm install --no-audit --no-fund
+      - run: npm run build
+      - run: test -f dist/nodes/Gostore/Gostore.node.js && test -f dist/nodes/Gostore/gostore.svg

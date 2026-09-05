@@ -41,6 +41,7 @@ docker run -d -p 9000:9000 -v gostore-data:/data \
 - [Deploy](#deploy)
 - [CLI embutida](#cli-embutida)
 - [Teste de carga](#teste-de-carga)
+- [Integrações](#integrações)
 - [Segurança](#segurança)
 - [Estado do projeto](#estado-do-projeto)
 - [Testes](#testes)
@@ -533,6 +534,20 @@ Sobe N goroutines fazendo `PUT → GET → DELETE` em loop e reporta ops/s,
 MiB/s de PUT e GET, e latência p50/p95/p99. O bucket é criado se não existir;
 as chaves `bench/…` são limpas no fim. Pra carga distribuída mais pesada, o
 [`warp`](https://github.com/minio/warp) do MinIO também roda contra o gostore.
+
+---
+
+## Integrações
+
+- **n8n** — node da comunidade em
+  [`integrations/n8n-nodes-gostore/`](integrations/n8n-nodes-gostore/):
+  objetos, buckets, URLs presigned, **transform de imagem** on-the-fly,
+  **ingest keys** e admin (snapshot, backup, uso por pasta). Instale via
+  *Settings → Community Nodes → `n8n-nodes-gostore`*. (O node S3 nativo do n8n
+  também funciona — é só apontar o endpoint.)
+- **Qualquer SDK / ferramenta S3** — AWS SDKs, `aws-cli`, `mc`, `rclone`,
+  `s3fs`, Terraform (`aws` provider com `endpoints.s3`), Cyberduck. Ver
+  [Compatibilidade S3](#compatibilidade-s3).
 
 ---
 

@@ -1,0 +1,57 @@
+{
+  "name": "n8n-nodes-gostore",
+  "version": "0.1.0",
+  "description": "n8n community node for gostore — S3-compatible object storage. Objects, buckets, presigned URLs, on-the-fly image transforms, ingest keys and admin (snapshots, backup, folder usage).",
+  "keywords": [
+    "n8n-community-node-package",
+    "gostore",
+    "s3",
+    "object-storage",
+    "minio"
+  ],
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/fdsriopreto-code/gostore/tree/main/integrations/n8n-nodes-gostore",
+  "author": {
+    "name": "gostore contributors"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fdsriopreto-code/gostore.git",
+    "directory": "integrations/n8n-nodes-gostore"
+  },
+  "main": "index.js",
+  "engines": {
+    "node": ">=18.10"
+  },
+  "scripts": {
+    "build": "tsc && node scripts/copy-assets.js",
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build"
+  },
+  "files": [
+    "dist",
+    "index.js"
+  ],
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "credentials": [
+      "dist/credentials/GostoreApi.credentials.js"
+    ],
+    "nodes": [
+      "dist/nodes/Gostore/Gostore.node.js"
+    ]
+  },
+  "peerDependencies": {
+    "n8n-workflow": "*"
+  },
+  "dependencies": {
+    "aws4": "^1.13.2",
+    "fast-xml-parser": "^4.5.0"
+  },
+  "devDependencies": {
+    "@types/aws4": "^1.11.6",
+    "@types/node": "^20.14.0",
+    "n8n-workflow": "^1.60.0",
+    "typescript": "^5.5.4"
+  }
+}
