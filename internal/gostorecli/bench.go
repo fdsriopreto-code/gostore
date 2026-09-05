@@ -60,15 +60,42 @@ func cmdBench(a []string) error {
 		return fmt.Errorf("bench needs NAME/bucket")
 	}
 
+	// Create the bench bucket if it's not there yet (ignore "already exists").
+	if resp, e := t.do(http.MethodPut, "/"+t.bucket, nil, nil, nil); e == nil && resp != nil {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+
 	payload := make([]byte, size)
 	_, _ = rand.Read(payload)
 
 	var (
-		puts, gets, dels, errs atomic.Int64
-		putBytes, getBytes     atomic.Int64
-		latMu                  sync.Mutex
-		lats                   []time.Duration
+		puts, gets, dels, errs, misses atomic.Int64
+		putBytes, getBytes             atomic.Int64
+		latMu                          sync.Mutex
+		lats                           []time.Duration
 	)
+
+	// When reading/deleting without a PUT in the mix, first lay down a small
+	// corpus so GET/DELETE hit real objects instead of 404ing. Each worker
+	// then cycles its key index within [0,corpus).
+	const corpus = 64
+	if (doGet || doDel) && !doPut {
+		fmt.Printf("warming up %d objects (%s each)…\n", conc*corpus, humanSize(size))
+		var wwg sync.WaitGroup
+		for w := 0; w < conc; w++ {
+			wwg.Add(1)
+			go func(w int) {
+				defer wwg.Done()
+				for i := 0; i < corpus; i++ {
+					resp, e := t.do(http.MethodPut, objPath(t.bucket, fmt.Sprintf("bench/w%d-%d", w, i)), nil, payload, nil)
+					_ = okResp(resp, e)
+				}
+			}(w)
+		}
+		wwg.Wait()
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), dur)
 	defer cancel()
 
@@ -81,7 +108,11 @@ func cmdBench(a []string) error {
 			defer wg.Done()
 			n := 0
 			for ctx.Err() == nil {
-				key := fmt.Sprintf("bench/w%d-%d", w, n)
+				idx := n
+				if !doPut {
+					idx = n % corpus // stay within the warm-up corpus
+				}
+				key := fmt.Sprintf("bench/w%d-%d", w, idx)
 				n++
 				if doPut {
 					s := time.Now()
@@ -98,13 +129,17 @@ func cmdBench(a []string) error {
 				if doGet {
 					s := time.Now()
 					resp, e := t.do(http.MethodGet, objPath(t.bucket, key), nil, nil, nil)
-					if e == nil && resp.StatusCode/100 == 2 {
+					switch {
+					case e == nil && resp.StatusCode/100 == 2:
 						nn, _ := io.Copy(io.Discard, resp.Body)
 						resp.Body.Close()
 						record(&latMu, &lats, time.Since(s))
 						gets.Add(1)
 						getBytes.Add(nn)
-					} else {
+					case e == nil && resp.StatusCode == http.StatusNotFound:
+						resp.Body.Close()
+						misses.Add(1)
+					default:
 						if resp != nil {
 							resp.Body.Close()
 						}
@@ -113,9 +148,12 @@ func cmdBench(a []string) error {
 				}
 				if doDel {
 					resp, e := t.do(http.MethodDelete, objPath(t.bucket, key), nil, nil, nil)
-					if okResp(resp, e) {
+					switch {
+					case okResp(resp, e):
 						dels.Add(1)
-					} else {
+					case e == nil && resp != nil && resp.StatusCode == http.StatusNotFound:
+						misses.Add(1)
+					default:
 						errs.Add(1)
 					}
 				}
@@ -142,8 +180,11 @@ func cmdBench(a []string) error {
 	fmt.Printf("  GET        %d   %s read     (%.1f MiB/s)\n", gets.Load(), humanSize(getBytes.Load()), float64(getBytes.Load())/el/(1<<20))
 	fmt.Printf("  DELETE     %d\n", dels.Load())
 	fmt.Printf("  errors     %d\n", errs.Load())
+	if m := misses.Load(); m > 0 {
+		fmt.Printf("  misses     %d  (404 — key not in the corpus, not a failure)\n", m)
+	}
 	fmt.Printf("  latency    p50 %s   p95 %s   p99 %s\n", p50.Round(time.Millisecond), p95.Round(time.Millisecond), p99.Round(time.Millisecond))
-	if errs.Load() > total/20 {
+	if total > 0 && errs.Load() > total/20 {
 		fmt.Fprintln(os.Stderr, "\n  (>5% errors — likely hit a limit: admission control / rate limit / disk. That's the ceiling.)")
 	}
 	return nil
