@@ -116,6 +116,12 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		s.adminRotateSecret(w, r)
 	case path == "buckets/empty" && r.Method == http.MethodPost:
 		s.adminEmptyBucket(w, r)
+	case path == "ingest-keys" && r.Method == http.MethodGet:
+		s.adminIngestKeysList(w, r)
+	case path == "ingest-keys" && r.Method == http.MethodPost:
+		s.adminIngestKeyCreate(w, r)
+	case path == "ingest-keys" && r.Method == http.MethodDelete:
+		s.adminIngestKeyDelete(w, r)
 	case path == "pool" && r.Method == http.MethodGet:
 		s.adminPoolStatus(w)
 	case path == "pool/decommission" && r.Method == http.MethodPost:

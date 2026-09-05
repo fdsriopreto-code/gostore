@@ -999,6 +999,40 @@ async function bucketSettings(v, b) {
   await editor("Event notifications", "notification", "application/json",
     JSON.stringify({ webhooks: [{ id: "w1", url: "https://example.com/hook", events: ["s3:ObjectCreated:*"], prefix: "", suffix: "" }] }, null, 2));
 
+  // --- Ingest keys (drop-a-backup tokens for any backend) ---
+  {
+    const box = el("div", { class: "card", style: "margin:20px 0" });
+    box.append(el("div", { class: "row", style: "justify-content:space-between;align-items:center" },
+      el("h3", { style: "margin:0;font-size:15px" }, "Ingest keys"),
+      el("button", { class: "primary sm", onclick: async () => {
+        const prefix = prompt("Prefix this key can write under (e.g. pg/ ):", "pg/") || "";
+        try {
+          const j = await (await must(await api("POST", "/gostore/admin/v1/ingest-keys", { query: { bucket: b }, contentType: "application/json", body: JSON.stringify({ prefix, label: "" }) }))).json();
+          modal("Ingest key — copy it now, shown once", "Any backend can now upload with a single header, no SigV4:", [
+            { name: "t", label: "Token", value: j.token, readonly: true },
+            { name: "c", label: "Example", value: j.example, readonly: true },
+          ], async () => {}, "Done");
+          render();
+        } catch (e) { toast(e.message, "err"); }
+      } }, ic(ICON.key), "Generate ingest key")));
+    box.append(el("p", { class: "muted small" }, "Write-only, prefix-scoped, no expiry. Great for pushing a DB dump into a bucket: ",
+      el("code", {}, "pg_dump ... | curl -T - -H 'Authorization: Bearer <token>' " + location.origin + "/gostore/ingest/" + b + "/pg/dump.sql")));
+    const list = el("div"); box.append(list);
+    (async () => {
+      let keys = [];
+      try { keys = await (await api("GET", "/gostore/admin/v1/ingest-keys", { query: { bucket: b } })).json(); } catch {}
+      if (!keys.length) { list.append(el("p", { class: "muted small" }, "No ingest keys.")); return; }
+      const tb = el("tbody");
+      for (const k of keys) tb.append(el("tr", {},
+        el("td", {}, el("code", { style: "font-size:11.5px" }, k.id)),
+        el("td", {}, el("code", {}, (k.prefix || "(any)"))),
+        el("td", { class: "muted" }, relTime(k.createdAt)),
+        el("td", { class: "act" }, el("button", { class: "ghost sm danger", onclick: async () => { try { await api("DELETE", "/gostore/admin/v1/ingest-keys", { query: { bucket: b, id: k.id } }); render(); } catch (e) { toast(e.message, "err"); } } }, "Revoke"))));
+      list.append(el("div", { class: "card", style: "margin-top:8px" }, el("table", {}, el("thead", {}, el("tr", {}, ...["ID", "Prefix", "Created", ""].map((h) => el("th", {}, h)))), tb)));
+    })();
+    v.append(box);
+  }
+
   // --- Static website hosting ---
   {
     let idx = "index.html", errd = "", on = false;
@@ -1729,6 +1763,7 @@ new PutObjectCommand({ Bucket: "b", Key: "k", Body: buf, ServerSideEncryption: "
     c.append(TBL(["Method & path", "Purpose"], [
       ["GET /gostore/metrics", "Prometheus exposition (request counts, capacity, per-bucket usage). Open unless <code>GOSTORE_METRICS_TOKEN</code> is set (then send <code>Authorization: Bearer &lt;token&gt;</code>)."],
       ["GET /gostore/health/persistence", "is the data volume persistent? bucket/user counts"],
+      ["PUT/POST /gostore/ingest/{bucket}/{key}", "write-only upload with an ingest token (<code>Authorization: Bearer gik_…</code> or <code>X-Gostore-Ingest-Key</code>) instead of SigV4. Prefix-scoped, no expiry. A key ending in <code>/</code> auto-dates the filename. Mint keys in bucket Settings → Ingest keys, or <code>POST /gostore/admin/v1/ingest-keys?bucket=X {prefix,label}</code>."],
     ]));
     c.append(el("h3", {}, "Per-bucket quota (S3-style sub-resource)"));
     c.append(TBL(["Method & path", "Body", "Purpose"], [

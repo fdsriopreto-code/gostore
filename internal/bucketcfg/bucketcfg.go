@@ -47,6 +47,21 @@ type Config struct {
 	// Compress stores new objects zstd-compressed at rest (erasure backend,
 	// non-SSE, single-part; already-compressed content-types are skipped).
 	Compress bool `json:"compress,omitempty"`
+
+	// IngestKeys are long-lived, write-only, prefix-scoped upload tokens for
+	// the /gostore/ingest/ endpoint — so any backend can drop a backup with a
+	// single header, no SigV4.
+	IngestKeys []IngestKey `json:"ingestKeys,omitempty"`
+}
+
+// IngestKey is one prefix-scoped write-only upload token. Only the token's
+// sha256 is stored.
+type IngestKey struct {
+	ID        string    `json:"id"`
+	Hash      string    `json:"hash"` // sha256 hex of the secret token
+	Prefix    string    `json:"prefix,omitempty"`
+	Label     string    `json:"label,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 // WebsiteConfig is the static-website-hosting configuration for a bucket.

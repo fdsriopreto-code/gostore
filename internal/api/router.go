@@ -76,6 +76,7 @@ func NewServer(cfg config.Config, obj object.Layer, im *iam.Manager, bc *bucketc
 	mux.HandleFunc("GET /gostore/health/persistence", s.handlePersistence)
 	mux.HandleFunc("GET /gostore/metrics", s.handleMetrics)
 	mux.Handle("/gostore/admin/v1/", http.HandlerFunc(s.handleAdmin))
+	mux.Handle("/gostore/ingest/", http.HandlerFunc(s.handleIngest))
 	if clusterRPC != nil {
 		mux.Handle("/gostore/internal/", clusterRPC)
 	}
