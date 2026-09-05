@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test -race -timeout 300s ./...
+
+  build:
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      matrix:
+        goos: [linux, darwin, windows]
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: build
+        env:
+          CGO_ENABLED: 0
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          out=gostore-${{ matrix.goos }}-${{ matrix.goarch }}
+          [ "${{ matrix.goos }}" = windows ] && out=$out.exe
+          go build -trimpath -ldflags "-s -w -X main.version=ci-${GITHUB_SHA::7}" -o "dist/$out" ./cmd/gostore
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gostore-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
