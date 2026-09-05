@@ -47,6 +47,62 @@ type DataUsage struct {
 	Buckets      map[string]BucketUsage `json:"buckets"`
 	TotalObjects int64                  `json:"totalObjects"`
 	TotalBytes   int64                  `json:"totalBytes"`
+
+	// Prefixes holds recursive usage for every "folder" (each "/"-terminated
+	// ancestor path of a key), keyed "<bucket>\x00<prefix>". Capped to keep
+	// memory bounded on pathological namespaces.
+	Prefixes map[string]BucketUsage `json:"-"`
+}
+
+// prefixUsageMax caps how many distinct folder prefixes the accounting pass
+// tracks (see DataUsage.Prefixes).
+const prefixUsageMax = 200_000
+
+// addPrefixUsage credits size to every "/"-terminated ancestor folder of key
+// (plus the bucket root ""), bounded by prefixUsageMax.
+func addPrefixUsage(m map[string]BucketUsage, bucket, key string, size int64) {
+	if m == nil {
+		return
+	}
+	credit := func(prefix string) {
+		k := bucket + "\x00" + prefix
+		u, ok := m[k]
+		if !ok && len(m) >= prefixUsageMax {
+			return
+		}
+		u.Objects++
+		u.Bytes += size
+		m[k] = u
+	}
+	credit("") // bucket root
+	for i := 0; i < len(key); i++ {
+		if key[i] == '/' {
+			credit(key[:i+1])
+		}
+	}
+}
+
+// PrefixUsage returns the recursive usage of one folder prefix (must end with
+// "/", or "" for the bucket root) and its immediate child folders.
+func (s *Scanner) PrefixUsage(bucket, prefix string) (self BucketUsage, children map[string]BucketUsage) {
+	children = map[string]BucketUsage{}
+	u := s.usage.Load()
+	if u == nil || u.Prefixes == nil {
+		return
+	}
+	self = u.Prefixes[bucket+"\x00"+prefix]
+	want := bucket + "\x00" + prefix
+	for k, v := range u.Prefixes {
+		if !strings.HasPrefix(k, want) || k == want {
+			continue
+		}
+		rest := k[len(want):]
+		// immediate child folder only: exactly one "/" and it's the last char
+		if i := strings.IndexByte(rest, '/'); i == len(rest)-1 {
+			children[rest] = v
+		}
+	}
+	return
 }
 
 // Scanner walks the object layer on an interval.
@@ -281,13 +337,13 @@ func (s *Scanner) ScanOnce(ctx context.Context) Report {
 	}
 	now := time.Now().UTC()
 
-	usage := &DataUsage{LastUpdate: now, Buckets: map[string]BucketUsage{}}
+	usage := &DataUsage{LastUpdate: now, Buckets: map[string]BucketUsage{}, Prefixes: map[string]BucketUsage{}}
 	for _, b := range buckets {
 		rules := enabledRules(s.cfg.Get(b.Name).Lifecycle)
 
 		// One walk of the bucket: usage + opportunistic heal + current-version
 		// expiration for every rule (was one full ListObjects pass per rule).
-		bu := s.walkBucket(ctx, b.Name, rules, now, &rep)
+		bu := s.walkBucket(ctx, b.Name, rules, now, &rep, usage.Prefixes)
 		usage.Buckets[b.Name] = bu
 		usage.TotalObjects += bu.Objects
 		usage.TotalBytes += bu.Bytes
@@ -308,7 +364,7 @@ func (s *Scanner) ScanOnce(ctx context.Context) Report {
 
 // walkBucket lists every object once: tallies size, heals a
 // 1-in-healSampleRate sample, and applies current-version expiration.
-func (s *Scanner) walkBucket(ctx context.Context, bucket string, rules []expRule, now time.Time, rep *Report) BucketUsage {
+func (s *Scanner) walkBucket(ctx context.Context, bucket string, rules []expRule, now time.Time, rep *Report, prefixes map[string]BucketUsage) BucketUsage {
 	var bu BucketUsage
 	token := ""
 	for {
@@ -320,6 +376,7 @@ func (s *Scanner) walkBucket(ctx context.Context, bucket string, rules []expRule
 		for _, o := range li.Objects {
 			bu.Objects++
 			bu.Bytes += o.Size
+			addPrefixUsage(prefixes, bucket, o.Name, o.Size)
 
 			// Per-object TTL (gostore extension): a stored absolute-expiry
 			// metadata key, enforced here regardless of lifecycle rules.

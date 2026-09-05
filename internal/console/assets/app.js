@@ -597,8 +597,24 @@ async function bucketObjects(v, b) {
     tbody.append(el("tr", { class: "clk", onclick: () => { bucketPrefix = parent; render(); } },
       el("td", {}), el("td", {}, el("div", { class: "nm folder" }, ic(ICON.up), el("span", {}, ".."))), el("td", {}), el("td", {}), el("td", {})));
   }
-  for (const p of prefixes) tbody.append(el("tr", { class: "clk", onclick: () => { bucketPrefix = p; render(); } },
-    el("td", {}), el("td", {}, el("div", { class: "nm folder" }, ic(ICON.folder), el("span", {}, p.slice(bucketPrefix.length)))), el("td", {}), el("td", {}), el("td", {})));
+  const folderRows = {};
+  for (const p of prefixes) {
+    const sizeCell = el("td", { class: "num muted small" }, "");
+    folderRows[p.slice(bucketPrefix.length)] = sizeCell;
+    tbody.append(el("tr", { class: "clk", onclick: () => { bucketPrefix = p; render(); } },
+      el("td", {}), el("td", {}, el("div", { class: "nm folder" }, ic(ICON.folder), el("span", {}, p.slice(bucketPrefix.length)))),
+      el("td", { class: "muted" }, ""), sizeCell, el("td", {})));
+  }
+  // Recursive per-folder usage from the last background scan (async, best-effort).
+  if (prefixes.length) (async () => {
+    try {
+      const du = await (await api("GET", "/gostore/admin/v1/du", { query: { bucket: b, prefix: bucketPrefix } })).json();
+      for (const [name, cell] of Object.entries(folderRows)) {
+        const u = (du.folders || {})[name];
+        if (u) { cell.textContent = fmtSize(u.bytes) + " · " + u.objects; cell.title = "recursive size · object count (from the last scan)"; }
+      }
+    } catch {}
+  })();
   for (const o of objs) {
     const nm = o.key.slice(bucketPrefix.length);
     const chk = el("input", { type: "checkbox", class: "rc", onclick: (e) => e.stopPropagation(), onchange: syncBulk });

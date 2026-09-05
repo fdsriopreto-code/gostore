@@ -89,6 +89,20 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 			"peers": peers, "peersUp": up, "peersTotal": len(peers),
 			"health": s.obj.Health(r.Context(), object.HealthOptions{}),
 		})
+	case path == "du" && r.Method == http.MethodGet:
+		bucket := r.URL.Query().Get("bucket")
+		prefix := r.URL.Query().Get("prefix")
+		self, children := s.scan.PrefixUsage(bucket, prefix)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"bucket": bucket, "prefix": prefix,
+			"self": self, "folders": children,
+			"asOf": func() any {
+				if u := s.scan.Usage(); u != nil {
+					return u.LastUpdate
+				}
+				return nil
+			}(),
+		})
 	case path == "datausage" && r.Method == http.MethodGet:
 		u := s.scan.Usage()
 		if u == nil {
