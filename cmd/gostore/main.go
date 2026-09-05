@@ -53,6 +53,7 @@ var version = "0.9.0"
 
 func main() {
 	metrics.SetVersion(version)
+	applyCPULimit()
 	applyMemLimit()
 	if len(os.Args) < 2 {
 		usage()

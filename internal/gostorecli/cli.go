@@ -18,12 +18,38 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/lojadopocket/gostore/internal/auth"
 )
+
+// httpClient is shared by every CLI request. The stdlib default caps idle
+// connections per host at 2, so a concurrent workload (bench, cp -r) pays a
+// fresh TCP+TLS handshake on almost every call — murder on a high-latency
+// link. Pool generously and keep connections warm.
+var httpClient = &http.Client{
+	Transport: &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		MaxIdleConns:          512,
+		MaxIdleConnsPerHost:   512,
+		MaxConnsPerHost:       0,
+		IdleConnTimeout:       90 * time.Second,
+		ForceAttemptHTTP2:     true,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: time.Second,
+		WriteBufferSize:       64 << 10,
+		ReadBufferSize:        64 << 10,
+	},
+}
+
+func init() {
+	if t, ok := httpClient.Transport.(*http.Transport); ok && t.MaxIdleConnsPerHost < runtime.GOMAXPROCS(0)*4 {
+		t.MaxIdleConnsPerHost = runtime.GOMAXPROCS(0) * 4
+	}
+}
 
 // Run executes one CLI subcommand and returns a process exit code.
 func Run(args []string) int {
@@ -222,7 +248,7 @@ func (t target) do(method, objPath string, query url.Values, body []byte, hdr ma
 		region = "us-east-1"
 	}
 	signV4(req, body, t.al.Access, t.al.Secret, region)
-	return http.DefaultClient.Do(req)
+	return httpClient.Do(req)
 }
 
 func signV4(req *http.Request, payload []byte, ak, sk, region string) {
