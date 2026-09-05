@@ -253,11 +253,12 @@ func (l *distLock) RUnlock(context.Context) { l.drop("runlock") }
 
 // tryAll sends op to every peer concurrently and returns the number that
 // answered yes. Sequential fan-out made a lock acquire cost N network round
-// trips and widened the unlocked window under contention.
-func (l *distLock) tryAll(op string) int {
+// trips and widened the unlocked window under contention. The token is passed
+// in (not read from l) so the background refresher never races grab/drop.
+func (l *distLock) tryAll(op, token string) int {
 	peers := l.c.peers
 	if len(peers) == 1 {
-		if peers[0].do(op, l.res, l.token) {
+		if peers[0].do(op, l.res, token) {
 			return 1
 		}
 		return 0
@@ -268,7 +269,7 @@ func (l *distLock) tryAll(op string) int {
 	for _, p := range peers {
 		go func(p *lockPeer) {
 			defer wg.Done()
-			if p.do(op, l.res, l.token) {
+			if p.do(op, l.res, token) {
 				atomic.AddInt32(&grants, 1)
 			}
 		}(p)
@@ -289,15 +290,17 @@ func (l *distLock) grab(ctx context.Context, timeout time.Duration, op, undo str
 	deadline := time.Now().Add(timeout)
 	backoff := lockBackoffLo
 	for {
-		l.token = randToken()
-		if l.tryAll(op) >= l.c.quorum {
+		token := randToken()
+		l.token = token
+		if l.tryAll(op, token) >= l.c.quorum {
 			lkCtx, cancel := context.WithCancel(ctx)
 			l.cancel = cancel
-			l.stop = make(chan struct{})
-			go l.refresher()
+			stop := make(chan struct{})
+			l.stop = stop
+			go l.refresher(token, stop, cancel)
 			return lkCtx, nil
 		}
-		l.tryAll(undo) // drop partial grants before retrying
+		l.tryAll(undo, token) // drop partial grants before retrying
 
 		if time.Now().After(deadline) {
 			return ctx, object.ErrWriteQuorum
@@ -313,6 +316,10 @@ func (l *distLock) grab(ctx context.Context, timeout time.Duration, op, undo str
 	}
 }
 
+// drop is called by the same goroutine that called grab (the RWLocker
+// contract), so its reads/writes of l.token/l.stop/l.cancel are ordered
+// against grab's writes without a mutex. The refresher goroutine touches none
+// of these fields — it got copies as arguments.
 func (l *distLock) drop(undo string) {
 	if l.stop != nil {
 		close(l.stop)
@@ -321,14 +328,14 @@ func (l *distLock) drop(undo string) {
 	if l.cancel != nil {
 		l.cancel() // CancelFunc is idempotent and safe to call again
 	}
-	if l.token == "" {
+	token := l.token
+	if token == "" {
 		return
 	}
-	l.tryAll(undo)
+	l.tryAll(undo, token)
 }
 
-func (l *distLock) refresher() {
-	stop, cancel := l.stop, l.cancel // set before this goroutine started
+func (l *distLock) refresher(token string, stop <-chan struct{}, cancel context.CancelFunc) {
 	t := time.NewTicker(lockRefresh)
 	defer t.Stop()
 	for {
@@ -336,7 +343,7 @@ func (l *distLock) refresher() {
 		case <-stop:
 			return
 		case <-t.C:
-			if l.tryAll("refresh") < l.c.quorum {
+			if l.tryAll("refresh", token) < l.c.quorum {
 				// Quorum lost: abort the holder's operation and stop.
 				if cancel != nil {
 					cancel()
