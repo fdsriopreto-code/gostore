@@ -7,6 +7,7 @@ package metrics
 import (
 	"fmt"
 	"io"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,7 +41,20 @@ var (
 	durN       uint64
 
 	version = "dev"
+
+	// runtime sizing, set once at startup from the container CPU quota.
+	rtGomaxprocs atomic.Int64
+	rtHostCPU    atomic.Int64
+	rtCPUQuota   atomic.Uint64 // milli-cores (quota * 1000)
 )
+
+// SetRuntimeInfo records the effective GOMAXPROCS, the host core count, and
+// the container CPU quota (in cores) for gostore_runtime_* gauges.
+func SetRuntimeInfo(gomaxprocs, hostCPU int, cpuQuota float64) {
+	rtGomaxprocs.Store(int64(gomaxprocs))
+	rtHostCPU.Store(int64(hostCPU))
+	rtCPUQuota.Store(uint64(cpuQuota * 1000))
+}
 
 type reqKey struct {
 	method string
@@ -134,6 +148,17 @@ func WritePrometheus(w io.Writer, g Gauges) {
 
 	help("gostore_uptime_seconds", "gauge", "Seconds since the process started.")
 	line(fmt.Sprintf("gostore_uptime_seconds %d", int64(time.Since(start).Seconds())))
+
+	if p := rtGomaxprocs.Load(); p > 0 {
+		help("gostore_runtime_gomaxprocs", "gauge", "Effective GOMAXPROCS.")
+		line(fmt.Sprintf("gostore_runtime_gomaxprocs %d", p))
+		help("gostore_runtime_host_cpu", "gauge", "CPU cores visible on the host.")
+		line(fmt.Sprintf("gostore_runtime_host_cpu %d", rtHostCPU.Load()))
+		help("gostore_runtime_cpu_quota_cores", "gauge", "Container CPU quota in cores (0 = unlimited).")
+		line(fmt.Sprintf("gostore_runtime_cpu_quota_cores %s", strconv.FormatFloat(float64(rtCPUQuota.Load())/1000, 'g', -1, 64)))
+	}
+	help("gostore_runtime_goroutines", "gauge", "Current goroutine count.")
+	line(fmt.Sprintf("gostore_runtime_goroutines %d", runtime.NumGoroutine()))
 
 	help("gostore_up", "gauge", "1 when storage reports healthy, else 0.")
 	up := 0

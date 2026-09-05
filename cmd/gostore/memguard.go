@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/lojadopocket/gostore/internal/logger"
+	"github.com/lojadopocket/gostore/internal/metrics"
 )
 
 // applyMemLimit gives the Go runtime a soft memory ceiling so GC stays
@@ -61,17 +62,25 @@ func applyCPULimit() {
 	if q <= 0 {
 		return // no container CPU limit — leave the runtime default
 	}
-	procs := int(q + 0.999) // round up so a 1.5-CPU quota gets 2
-	if procs < 1 {
-		procs = 1
+	// ceil(quota) + 1 headroom thread: this server blocks in fsync a lot, and
+	// a spare P lets another request run while one is stuck in that syscall.
+	// Floor of 2 for the same reason; never exceed the host core count.
+	procs := int(q)
+	if float64(procs) < q {
+		procs++ // ceil
+	}
+	procs++ // I/O-overlap headroom
+	if procs < 2 {
+		procs = 2
 	}
 	if hw := runtime.NumCPU(); procs > hw {
 		procs = hw
 	}
 	if procs != runtime.GOMAXPROCS(0) {
 		runtime.GOMAXPROCS(procs)
-		logger.Info("GOMAXPROCS pinned to container CPU quota", "quota", q, "gomaxprocs", procs, "hostCPU", runtime.NumCPU())
 	}
+	logger.Info("GOMAXPROCS set from container CPU quota", "quota", q, "gomaxprocs", procs, "hostCPU", runtime.NumCPU())
+	metrics.SetRuntimeInfo(procs, runtime.NumCPU(), q)
 }
 
 // cgroupCPUQuota returns the container's CPU allowance in whole cores
