@@ -31,6 +31,7 @@ docker run -d -p 9000:9000 -v gostore-data:/data \
 ## Índice
 
 - [Por que gostore](#por-que-gostore)
+- [Screenshots](#screenshots)
 - [Início rápido](#início-rápido)
 - [Usar como backend da sua aplicação](#usar-como-backend-da-sua-aplicação)
 - [Compatibilidade S3](#compatibilidade-s3)
@@ -59,6 +60,36 @@ docker run -d -p 9000:9000 -v gostore-data:/data \
 | **Bateria inclusa** | Console web (SPA embutida, sem build), CLI cliente no mesmo binário, métricas Prometheus, log de atividade ao vivo, healthchecks e um selftest que faz um round-trip completo e responde JSON. |
 | **Vai além do S3** | Dedup por conteúdo, compressão zstd em repouso, tiering pra S3 frio, snapshots de bucket, backup automático, TTL por objeto, cache em RAM, thumbnails/resize on-the-fly, site estático, append em objeto, auditoria hash-encadeada, KMS externo via Vault. |
 | **Apache 2.0** | Rode, modifique e embarque em produto fechado sem obrigação de abrir seu código. |
+
+---
+
+## Screenshots
+
+O console web é servido pelo próprio binário em `/gostore/console/` — sem build,
+sem processo separado.
+
+![Dashboard](docs/screenshots/dashboard.png)
+<sub>**Dashboard** — endpoint, região, modo (single-disk ou erasure), capacidade.</sub>
+
+![Buckets](docs/screenshots/buckets.png)
+<sub>**Buckets** — criar, navegar, uso por pasta, drag & drop de upload.</sub>
+
+![Monitoring](docs/screenshots/monitoring.png)
+<sub>**Data health** — deep scrub, falhas de integridade, read-repairs na fila,
+heal ok/erro, read-only, verificação da cadeia de auditoria.</sub>
+
+<details>
+<summary>Mais telas</summary>
+
+![Access Keys](docs/screenshots/access-keys.png)
+<sub>**Access Keys** — usuários e service accounts, policy, rotação de secret.</sub>
+
+![Documentation](docs/screenshots/docs.png)
+<sub>**Documentation** — ~15 páginas embutidas: conectar SDK, presigned, IAM,
+versionamento, Object Lock, lifecycle, replicação, criptografia, admin API,
+cluster.</sub>
+
+</details>
 
 ---
 
