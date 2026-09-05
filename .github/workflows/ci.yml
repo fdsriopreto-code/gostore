@@ -66,6 +66,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - run: npm install --no-audit --no-fund
+      - run: npm install --ignore-scripts --no-audit --no-fund
       - run: npm run build
       - run: test -f dist/nodes/Gostore/Gostore.node.js && test -f dist/nodes/Gostore/gostore.svg
