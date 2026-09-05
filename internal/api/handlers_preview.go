@@ -16,6 +16,14 @@ import (
 	"github.com/lojadopocket/gostore/internal/object"
 )
 
+// previewSem bounds concurrent server-side image decodes (each holds a
+// full-resolution bitmap in memory).
+var previewSem = make(chan struct{}, 2)
+
+// previewMaxPixels rejects images that would decode to a huge bitmap
+// (~24 MP -> ~96 MB as RGBA).
+const previewMaxPixels = 24_000_000
+
 // previewMaxDecodeBytes caps how much of an object the image endpoint will
 // pull in to decode, so a huge upload can't blow memory.
 const previewMaxDecodeBytes = 40 << 20
@@ -110,6 +118,11 @@ func (s *Server) handleObjectPreview(w http.ResponseWriter, r *http.Request, buc
 		}
 	}
 
+	// Bound concurrent decodes: a full-resolution image decode holds tens of
+	// MB, and a bucket view fires many thumbnail requests at once.
+	previewSem <- struct{}{}
+	defer func() { <-previewSem }()
+
 	gr, err := s.obj.GetObjectNInfo(r.Context(), bucket, key, nil, r.Header, s.vopts(bucket, r))
 	if err != nil {
 		writeErrorResponse(w, r, toAPIError(err), res)
@@ -126,6 +139,16 @@ func (s *Server) handleObjectPreview(w http.ResponseWriter, r *http.Request, buc
 			break
 		}
 	}
+
+	// Reject an image whose pixel count would blow memory when decoded
+	// (DecodeConfig is header-only, cheap).
+	if cfg, _, cerr := image.DecodeConfig(bytes.NewReader(raw)); cerr == nil {
+		if int64(cfg.Width)*int64(cfg.Height) > previewMaxPixels {
+			writeErrorResponse(w, r, ErrEntityTooLarge, res)
+			return
+		}
+	}
+
 	src, _, err := image.Decode(bytes.NewReader(raw))
 	if err != nil {
 		writeErrorResponse(w, r, ErrNotImplemented, res) // "not an image we can render"

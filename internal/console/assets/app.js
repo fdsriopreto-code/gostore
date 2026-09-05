@@ -52,8 +52,8 @@ async function api(method, path, opts = {}) {
 // server-side if it can't finish. Big videos/archives upload faster and a
 // blip doesn't cost you the whole transfer.
 const MPU_THRESHOLD = 16 * 1024 * 1024;
-const MPU_PART = 16 * 1024 * 1024; // must be >= 5 MiB except the last part
-const MPU_CONCURRENCY = 3;
+const MPU_PART = 8 * 1024 * 1024; // must be >= 5 MiB except the last part
+const MPU_CONCURRENCY = 2;        // 2 x 8 MiB in flight per upload keeps server RAM modest
 
 async function upload(path, file, onProgress) {
   if (file.size <= MPU_THRESHOLD) return uploadSingle(path, file, onProgress);
@@ -1803,6 +1803,7 @@ GOSTORE_CLUSTER_SELF=http://node2:9000 gostore server \\
       ["GOSTORE_ALLOW_FORMAT_MISMATCH", "0", "set <code>1</code> to start even when a disk's on-disk position (set/disk index) disagrees with the configured order — only during a deliberate topology migration"],
       ["GOSTORE_MAX_INFLIGHT_BYTES", "536870912", "cap on total request-body bytes in flight for writes; over it new writes get <code>503 SlowDown</code>"],
       ["GOSTORE_MEM_LIMIT_BYTES", "0", "when set, heap-in-use above this sheds new writes with 503 for ~5s (memory backpressure); <code>0</code> disables"],
+      ["GOSTORE_MEM_LIMIT / GOMEMLIMIT", "auto (cgroup)", "soft Go memory ceiling (bytes or <code>256MiB</code>/<code>1g</code>). Unset, gostore reads the container's cgroup limit and sets it to ~90% so the GC returns RAM to the OS on a small VPS. A 3-min scavenger also frees idle heap after a spike."],
       ["GOSTORE_DEDUP", "0", "set <code>1</code> for content-addressed dedup: byte-identical objects (erasure, non-SSE) share one set of shard files under <code>.gostore.sys/cas/&lt;sha256&gt;/</code>; unreferenced blobs are removed by a mark-and-sweep GC on the deep-scrub cadence. Server-side copies of identical content become near-free."],
       ["GOSTORE_TIER_&lt;NAME&gt;", "—", "register a remote cold-storage tier: <code>endpoint|region|bucket|access|secret[|prefix]</code>. A lifecycle <code>&lt;Transition&gt;&lt;Days&gt;N&lt;/Days&gt;&lt;StorageClass&gt;name&lt;/StorageClass&gt;&lt;/Transition&gt;</code> rule then moves cold objects there (local stub, transparent GET rehydration, remote-delete on DELETE)."],
     ]));

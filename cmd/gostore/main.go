@@ -53,6 +53,7 @@ var version = "0.9.0"
 
 func main() {
 	metrics.SetVersion(version)
+	applyMemLimit()
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
@@ -268,6 +269,7 @@ func serve(cfg config.Config, obj object.Layer, clusterRPC http.Handler) error {
 
 	refreshCtx, stopRefresh := context.WithCancel(context.Background())
 	defer stopRefresh()
+	startMemScavenger(refreshCtx)
 
 	iamMgr, err := iam.New(cfg.RootUser, cfg.RootPassword, cb)
 	if err != nil {
