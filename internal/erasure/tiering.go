@@ -47,6 +47,10 @@ func tierClient(name string) *remotes3.Client {
 	return tierByName[name]
 }
 
+// TierClient returns the remote client for a registered tier (nil if unknown).
+// Exported for the backup job.
+func TierClient(name string) *remotes3.Client { return tierClient(name) }
+
 // tierObjectKey is the remote key an object lands under: "<bucket>/<key>".
 func tierObjectKey(bucket, key string) string { return bucket + "/" + key }
 

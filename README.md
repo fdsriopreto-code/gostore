@@ -212,6 +212,18 @@ gostore admin snapshot gs meu-bucket      # snapshot / "list" / "restore <id>"
 
 Aliases ficam em `~/.gostore/aliases.json` (`GOSTORE_ALIAS_FILE` sobrescreve).
 
+### Teste de carga (`gostore bench`)
+
+Estressa o servidor com PUT/GET/DELETE concorrentes e reporta ops/s, throughput e latência p50/p95/p99:
+
+```bash
+gostore bench gs/bench-bucket --duration 60s --concurrency 50 --size 4MiB
+gostore bench gs/bench-bucket --mix get                 # só leitura
+gostore bench gs/bench-bucket -c 200 --size 64KiB       # muitos objetos pequenos
+```
+
+O bucket é criado se não existir; as chaves `bench/…` são removidas ao final. Para cargas mais pesadas / distribuídas, o [`warp`](https://github.com/minio/warp) do MinIO também funciona contra o gostore (endpoint S3 path-style).
+
 ## Usando com clientes S3
 
 Path-style, região `us-east-1` (default). Exemplos com `mc` e `aws`:

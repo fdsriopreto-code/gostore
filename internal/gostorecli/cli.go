@@ -52,6 +52,8 @@ func Run(args []string) int {
 		err = cmdStat(rest)
 	case "admin":
 		err = cmdAdmin(rest)
+	case "bench":
+		err = cmdBench(rest)
 	default:
 		fmt.Fprintf(os.Stderr, "gostore: unknown command %q\n\n", cmd)
 		usage()
@@ -84,6 +86,9 @@ func usage() {
   gostore admin scrub     NAME [status]
   gostore admin readonly  NAME on|off
   gostore admin snapshot  NAME BUCKET [restore ID | list]
+
+  gostore bench  NAME/bucket [--duration 30s] [--size 1MiB]
+                             [--concurrency 20] [--mix put,get,delete]
 `)
 }
 

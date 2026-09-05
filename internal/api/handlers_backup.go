@@ -1,0 +1,201 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"sync/atomic"
+	"time"
+
+	"github.com/lojadopocket/gostore/internal/configstore"
+	"github.com/lojadopocket/gostore/internal/erasure"
+	"github.com/lojadopocket/gostore/internal/object"
+)
+
+// Scheduled self-backup: when enabled, gostore periodically mirrors every
+// object to a registered remote tier (GOSTORE_TIER_<NAME>). Incremental — an
+// object is skipped when the remote already has it at the same size.
+
+const backupCfgKey = "backup/config"
+
+type backupConfig struct {
+	Enabled       bool   `json:"enabled"`
+	Tier          string `json:"tier"`
+	IntervalHours int    `json:"intervalHours"`
+	Prefix        string `json:"prefix,omitempty"` // only back up keys under this (per-bucket)
+}
+
+type backupStatus struct {
+	Running     bool      `json:"running"`
+	LastRun     time.Time `json:"lastRun,omitempty"`
+	LastError   string    `json:"lastError,omitempty"`
+	Copied      int64     `json:"copied"`
+	Skipped     int64     `json:"skipped"`
+	Errors      int64     `json:"errors"`
+	BytesCopied int64     `json:"bytesCopied"`
+}
+
+type backupJob struct {
+	obj     object.Layer
+	cstore  configstore.Backend
+	status  atomic.Pointer[backupStatus]
+	running atomic.Bool
+}
+
+func newBackupJob(obj object.Layer) *backupJob {
+	cs, _ := obj.(configstore.Backend)
+	return &backupJob{obj: obj, cstore: cs}
+}
+
+func (j *backupJob) config() backupConfig {
+	var c backupConfig
+	if j.cstore == nil {
+		return c
+	}
+	if b, err := j.cstore.ReadConfig(context.Background(), backupCfgKey); err == nil {
+		_ = json.Unmarshal(b, &c)
+	}
+	return c
+}
+
+func (j *backupJob) setConfig(c backupConfig) error {
+	if j.cstore == nil {
+		return configstore.ErrNotFound
+	}
+	b, _ := json.Marshal(c)
+	return j.cstore.WriteConfig(context.Background(), backupCfgKey, b)
+}
+
+// loop runs the backup on its configured cadence.
+func (j *backupJob) loop(ctx context.Context) {
+	t := time.NewTicker(30 * time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			c := j.config()
+			if !c.Enabled || c.Tier == "" {
+				continue
+			}
+			iv := time.Duration(c.IntervalHours) * time.Hour
+			if iv <= 0 {
+				iv = 24 * time.Hour
+			}
+			st := j.status.Load()
+			if st != nil && time.Since(st.LastRun) < iv {
+				continue
+			}
+			j.run(ctx)
+		}
+	}
+}
+
+// run mirrors every object to the configured tier once. Single-flight.
+func (j *backupJob) run(ctx context.Context) {
+	if !j.running.CompareAndSwap(false, true) {
+		return
+	}
+	defer j.running.Store(false)
+
+	c := j.config()
+	cl := erasure.TierClient(c.Tier)
+	if cl == nil {
+		j.status.Store(&backupStatus{LastRun: time.Now().UTC(), LastError: "tier " + c.Tier + " is not configured (GOSTORE_TIER_" + c.Tier + ")"})
+		return
+	}
+	st := &backupStatus{Running: true, LastRun: time.Now().UTC()}
+	j.status.Store(st)
+
+	buckets, err := j.obj.ListBuckets(ctx)
+	if err != nil {
+		st.Running, st.LastError = false, err.Error()
+		j.status.Store(clone(st))
+		return
+	}
+	for _, b := range buckets {
+		token := ""
+		for {
+			if ctx.Err() != nil {
+				break
+			}
+			li, lerr := j.obj.ListObjectsV2(ctx, b.Name, c.Prefix, token, "", 1000, false, "")
+			if lerr != nil {
+				st.Errors++
+				break
+			}
+			for _, o := range li.Objects {
+				if ctx.Err() != nil {
+					break
+				}
+				rk := b.Name + "/" + o.Name
+				if exists, sz, _, herr := cl.Head(ctx, rk); herr == nil && exists && sz == o.Size {
+					st.Skipped++
+					j.status.Store(clone(st))
+					continue
+				}
+				gr, gerr := j.obj.GetObjectNInfo(ctx, b.Name, o.Name, nil, nil, object.ObjectOptions{})
+				if gerr != nil {
+					st.Errors++
+					continue
+				}
+				perr := cl.Put(ctx, rk, gr, o.Size, o.ContentType)
+				gr.Close()
+				if perr != nil {
+					st.Errors++
+					st.LastError = perr.Error()
+				} else {
+					st.Copied++
+					st.BytesCopied += o.Size
+				}
+				j.status.Store(clone(st))
+			}
+			if !li.IsTruncated {
+				break
+			}
+			token = li.NextContinuationToken
+		}
+	}
+	st.Running = false
+	j.status.Store(st)
+}
+
+func clone(s *backupStatus) *backupStatus { c := *s; return &c }
+
+// --- admin routes ----------------------------------------------------
+
+func (s *Server) handleAdminBackup(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		out := map[string]any{"config": s.backup.config(), "tiers": erasure.TierNames()}
+		if st := s.backup.status.Load(); st != nil {
+			out["status"] = st
+		}
+		writeJSON(w, http.StatusOK, out)
+	case http.MethodPut:
+		b, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+		var c backupConfig
+		if json.Unmarshal(b, &c) != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+		if c.Enabled && erasure.TierClient(c.Tier) == nil {
+			writeJSONError(w, http.StatusBadRequest, "tier "+c.Tier+" is not configured (set GOSTORE_TIER_"+c.Tier+")")
+			return
+		}
+		if err := s.backup.setConfig(c); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, c)
+	default:
+		writeJSONError(w, http.StatusMethodNotAllowed, "GET or PUT")
+	}
+}
+
+func (s *Server) handleAdminBackupRun(w http.ResponseWriter, r *http.Request) {
+	go s.backup.run(context.Background())
+	writeJSON(w, http.StatusAccepted, map[string]any{"started": true})
+}

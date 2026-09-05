@@ -1254,6 +1254,65 @@ async function viewMonitoring(v) {
     v.append(dh);
   }
 
+  // --- Automatic backup ---
+  try {
+    const bk = await (await api("GET", "/gostore/admin/v1/backup")).json();
+    const cfg = bk.config || {};
+    const tiers = bk.tiers || [];
+    const bc = el("div", { class: "card", style: "margin:20px 0" });
+    bc.append(el("div", { class: "row", style: "justify-content:space-between;align-items:center" },
+      el("h3", { style: "margin:0;font-size:15px" }, "Automatic backup"),
+      el("button", {
+        class: "ghost sm", disabled: tiers.length ? null : "disabled",
+        onclick: async () => { try { await must(await api("POST", "/gostore/admin/v1/backup/run")); toast("Backup started", "ok"); setTimeout(render, 1200); } catch (e) { toast(e.message, "err"); } }
+      }, "Back up now")));
+
+    if (!tiers.length) {
+      bc.append(el("p", { class: "muted small" }, "No remote tier is configured. Set ",
+        el("code", {}, "GOSTORE_TIER_<NAME>=s3,https://endpoint,region,bucket,access,secret[,prefix]"),
+        " (any S3-compatible target — Backblaze B2, Cloudflare R2, Wasabi, another gostore) and restart to enable scheduled off-site backups."));
+    } else {
+      const enabled = el("input", { type: "checkbox" });
+      if (cfg.enabled) enabled.checked = true;
+      const tierSel = el("select", {}, ...tiers.map((t) => el("option", { value: t, selected: t === cfg.tier ? "selected" : null }, t)));
+      const iv = el("input", { type: "number", min: "1", value: String(cfg.intervalHours || 24), style: "width:80px" });
+      const pfx = el("input", { type: "text", value: cfg.prefix || "", placeholder: "(all keys)", style: "width:160px" });
+      const form = el("div", { class: "grid", style: "gap:10px;margin:12px 0;max-width:520px" },
+        el("label", { class: "row", style: "gap:8px;align-items:center" }, enabled, "Enabled — mirror every object to the tier below on a schedule"),
+        el("label", { class: "row", style: "gap:8px;align-items:center" }, "Destination tier", tierSel),
+        el("label", { class: "row", style: "gap:8px;align-items:center" }, "Every", iv, "hours"),
+        el("label", { class: "row", style: "gap:8px;align-items:center" }, "Key prefix", pfx),
+        el("button", {
+          class: "primary sm", style: "justify-self:start",
+          onclick: async () => {
+            try {
+              await must(await api("PUT", "/gostore/admin/v1/backup", {
+                contentType: "application/json",
+                body: JSON.stringify({
+                  enabled: enabled.checked, tier: tierSel.value,
+                  intervalHours: parseInt(iv.value, 10) || 24, prefix: pfx.value.trim(),
+                }),
+              }));
+              toast("Backup settings saved", "ok"); setTimeout(render, 600);
+            } catch (e) { toast(e.message, "err"); }
+          }
+        }, "Save"));
+      bc.append(form);
+      const st = bk.status;
+      if (st) {
+        const line = st.running
+          ? `Running — ${st.copied} copied, ${st.skipped} unchanged, ${st.errors} errors`
+          : (st.lastRun
+            ? `Last run ${relTime(st.lastRun)} — ${st.copied} copied (${fmtSize(st.bytesCopied)}), ${st.skipped} unchanged, ${st.errors} errors`
+            : "Never run yet");
+        bc.append(el("p", { class: "small", style: st.errors ? "color:var(--red,#c0392b)" : "" }, line));
+        if (st.lastError) bc.append(el("p", { class: "small muted" }, "Last error: " + st.lastError));
+      }
+    }
+    bc.append(el("p", { class: "muted small" }, "Incremental: an object is skipped when the tier already holds it at the same size. Runs are single-flight and survive restarts. Backups are plain S3 objects on the remote — restore with any S3 client."));
+    v.append(bc);
+  } catch {}
+
   let du = null;
   try { du = await (await api("GET", "/gostore/admin/v1/datausage")).json(); } catch {}
   if (du && du.buckets && Object.keys(du.buckets).length) {
@@ -1751,6 +1810,9 @@ new PutObjectCommand({ Bucket: "b", Key: "k", Body: buf, ServerSideEncryption: "
       ["GET /gostore/admin/v1/audit?limit=N&after=SEQ", "—", "tamper-evident audit log: every successful mutation as a hash-chained entry, also written to <code>&lt;vol0&gt;/.gostore.sys/audit/audit-YYYYMMDD.jsonl</code>"],
       ["GET /gostore/admin/v1/audit/verify", "—", "walk the chain; reports <code>{entries, intact, brokenAtSeq}</code> — any edited or removed entry breaks it"],
       ["GET /gostore/admin/v1/datausage", "—", "per-bucket object counts &amp; byte totals from the last scan"],
+      ["GET /gostore/admin/v1/du?bucket=X&amp;prefix=P/", "—", "storage used by one folder and its immediate sub-folders (from the last scan): <code>{self, folders}</code>"],
+      ["GET/PUT /gostore/admin/v1/backup", "<code>{enabled, tier, intervalHours, prefix?}</code>", "scheduled self-backup: mirror every object to a remote S3 tier (<code>GOSTORE_TIER_&lt;NAME&gt;</code>) on a fixed cadence. Incremental (skips objects the tier already holds at the same size), single-flight, survives restarts."],
+      ["POST /gostore/admin/v1/backup/run", "—", "run the self-backup once, now (returns <code>202 {started:true}</code>)"],
       ["GET /gostore/admin/v1/whoami", "—", "<b>any authenticated key</b>: your identity, effective policies, admin?"],
       ["POST /gostore/admin/v1/users/rotate-secret", "<code>{accessKey, secretKey?}</code>", "give an existing user a fresh secret (old one dies immediately)"],
       ["POST /gostore/admin/v1/buckets/empty?bucket=X", "—", "delete every object (all versions) without deleting the bucket"],

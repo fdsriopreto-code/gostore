@@ -80,6 +80,27 @@ func (c *Client) Get(ctx context.Context, key string) (io.ReadCloser, int64, err
 	return resp.Body, resp.ContentLength, nil
 }
 
+// Head reports whether the remote object exists and its size/etag.
+func (c *Client) Head(ctx context.Context, key string) (exists bool, size int64, etag string, err error) {
+	req, err := c.newReq(ctx, http.MethodHead, key, nil)
+	if err != nil {
+		return false, 0, "", err
+	}
+	c.sign(req, emptyHash)
+	resp, err := c.http().Do(req)
+	if err != nil {
+		return false, 0, "", err
+	}
+	resp.Body.Close()
+	if resp.StatusCode == 404 {
+		return false, 0, "", nil
+	}
+	if resp.StatusCode/100 != 2 {
+		return false, 0, "", fmt.Errorf("remote HEAD %s: %s", key, resp.Status)
+	}
+	return true, resp.ContentLength, strings.Trim(resp.Header.Get("ETag"), `"`), nil
+}
+
 // Delete removes the remote object (a 404 is not an error).
 func (c *Client) Delete(ctx context.Context, key string) error {
 	req, err := c.newReq(ctx, http.MethodDelete, key, nil)
@@ -102,6 +123,11 @@ const emptyHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b
 
 func (c *Client) newReq(ctx context.Context, method, key string, body io.Reader) (*http.Request, error) {
 	u := strings.TrimRight(c.Endpoint, "/") + "/" + c.Bucket + "/" + c.key(key)
+	// Wrap so net/http never closes a body the caller still owns (e.g. a
+	// GetObjectReader whose Close releases a backend lock).
+	if body != nil {
+		body = io.NopCloser(body)
+	}
 	return http.NewRequestWithContext(ctx, method, u, body)
 }
 

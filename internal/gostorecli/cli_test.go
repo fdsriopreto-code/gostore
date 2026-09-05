@@ -60,6 +60,7 @@ func TestCLIEndToEnd(t *testing.T) {
 	run("ls", "t/clibucket")
 	run("rm", "t/clibucket/greeting.txt")
 	run("admin", "info", "t")
+	run("bench", "t/clibucket", "--duration", "1s", "--size", "4KiB", "--concurrency", "4")
 
 	// A bad alias credential must fail.
 	run("alias", "set", "bad", srv.URL, "cliadmin", "wrong-secret")

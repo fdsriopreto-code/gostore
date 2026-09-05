@@ -68,7 +68,7 @@ func main() {
 		fmt.Printf("gostore %s %s/%s (%s)\n", version, runtime.GOOS, runtime.GOARCH, runtime.Version())
 	case "help", "-h", "--help":
 		usage()
-	case "alias", "ls", "cp", "rm", "mb", "rb", "cat", "stat", "admin":
+	case "alias", "ls", "cp", "rm", "mb", "rb", "cat", "stat", "admin", "bench":
 		os.Exit(gostorecli.Run(os.Args[1:]))
 	default:
 		fmt.Fprintf(os.Stderr, "gostore: unknown command %q\n\n", os.Args[1])

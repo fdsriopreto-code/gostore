@@ -33,6 +33,7 @@ type Server struct {
 	ocache   *objCache
 	ro       readOnlyState
 	adm      *admissionControl
+	backup   *backupJob
 
 	domainNames []string
 }
@@ -59,7 +60,9 @@ func NewServer(cfg config.Config, obj object.Layer, im *iam.Manager, bc *bucketc
 		vol0 = cfg.Volumes[0]
 	}
 	auditL = newAuditLog(vol0)
+	s.backup = newBackupJob(obj)
 	go s.watchQuorum(context.Background())
+	go s.backup.loop(context.Background())
 	if v := strings.TrimSpace(os.Getenv("GOSTORE_DOMAIN")); v != "" {
 		for _, d := range strings.Split(v, ",") {
 			if d = strings.TrimSpace(d); d != "" {

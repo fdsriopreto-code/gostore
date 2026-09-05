@@ -122,6 +122,10 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		s.adminIngestKeyCreate(w, r)
 	case path == "ingest-keys" && r.Method == http.MethodDelete:
 		s.adminIngestKeyDelete(w, r)
+	case path == "backup":
+		s.handleAdminBackup(w, r)
+	case path == "backup/run" && r.Method == http.MethodPost:
+		s.handleAdminBackupRun(w, r)
 	case path == "pool" && r.Method == http.MethodGet:
 		s.adminPoolStatus(w)
 	case path == "pool/decommission" && r.Method == http.MethodPost:
