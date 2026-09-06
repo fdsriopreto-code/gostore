@@ -9,7 +9,7 @@ export class GostoreApi implements ICredentialType {
 
 	displayName = 'gostore API';
 
-	documentationUrl = 'https://github.com/fdsriopreto-code/gostore';
+	documentationUrl = 'https://github.com/fdsriopreto-code/gostore-s3';
 
 	properties: INodeProperties[] = [
 		{

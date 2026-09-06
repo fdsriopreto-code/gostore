@@ -3,8 +3,8 @@
 ## Setup
 
 ```bash
-git clone https://github.com/fdsriopreto-code/gostore
-cd gostore
+git clone https://github.com/fdsriopreto-code/gostore-s3
+cd gostore-s3
 go build ./...
 go test ./...
 ```

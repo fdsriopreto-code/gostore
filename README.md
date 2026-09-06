@@ -20,7 +20,7 @@ contrário do AGPL do MinIO).
 ```bash
 docker run -d -p 9000:9000 -v gostore-data:/data \
   -e GOSTORE_ROOT_USER=admin -e GOSTORE_ROOT_PASSWORD=troque-esta-senha \
-  ghcr.io/fdsriopreto-code/gostore:latest
+  ghcr.io/fdsriopreto-code/gostore-s3:latest
 
 # console:  http://localhost:9000/gostore/console/
 # saúde:    http://localhost:9000/gostore/health/selftest
@@ -102,7 +102,7 @@ docker run -d --name gostore -p 9000:9000 \
   -v gostore-data:/data \
   -e GOSTORE_ROOT_USER=admin \
   -e GOSTORE_ROOT_PASSWORD=uma-senha-forte-min-8 \
-  ghcr.io/fdsriopreto-code/gostore:latest
+  ghcr.io/fdsriopreto-code/gostore-s3:latest
 
 curl -s localhost:9000/gostore/health/selftest    # {"ok":true,"steps":[...]}
 ```

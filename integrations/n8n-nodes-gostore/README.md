@@ -1,6 +1,6 @@
 # n8n-nodes-gostore
 
-n8n community node for [**gostore**](https://github.com/fdsriopreto-code/gostore) —
+n8n community node for [**gostore**](https://github.com/fdsriopreto-code/gostore-s3) —
 an S3-compatible object storage server.
 
 > **You don't strictly need this node.** gostore speaks the S3 protocol, so

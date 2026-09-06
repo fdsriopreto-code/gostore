@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-gostore",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "n8n community node for gostore — S3-compatible object storage. Objects, buckets, presigned URLs, on-the-fly image transforms, ingest keys and admin (snapshots, backup, folder usage).",
   "keywords": [
     "n8n-community-node-package",
@@ -10,13 +10,13 @@
     "minio"
   ],
   "license": "Apache-2.0",
-  "homepage": "https://github.com/fdsriopreto-code/gostore/tree/main/integrations/n8n-nodes-gostore",
+  "homepage": "https://github.com/fdsriopreto-code/gostore-s3/tree/main/integrations/n8n-nodes-gostore",
   "author": {
     "name": "gostore contributors"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/fdsriopreto-code/gostore.git",
+    "url": "git+https://github.com/fdsriopreto-code/gostore-s3.git",
     "directory": "integrations/n8n-nodes-gostore"
   },
   "main": "index.js",
